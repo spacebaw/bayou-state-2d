@@ -1,13 +1,23 @@
 import bellTowerUrl from '../assets/sprites/bell_tower.png';
+import bellTowerGlowUrl from '../assets/sprites/bell_tower_glow.png';
 import collegeBlueUrl from '../assets/sprites/college_blue.png';
+import collegeBlueGlowUrl from '../assets/sprites/college_blue_glow.png';
 import collegeHallUrl from '../assets/sprites/college_hall.png';
+import collegeHallGlowUrl from '../assets/sprites/college_hall_glow.png';
 import collegePurpleUrl from '../assets/sprites/college_purple.png';
+import collegePurpleGlowUrl from '../assets/sprites/college_purple_glow.png';
 import collegeTealUrl from '../assets/sprites/college_teal.png';
+import collegeTealGlowUrl from '../assets/sprites/college_teal_glow.png';
 import dormBrickUrl from '../assets/sprites/dorm_brick.png';
+import dormBrickGlowUrl from '../assets/sprites/dorm_brick_glow.png';
 import foundersHallUrl from '../assets/sprites/founders_hall.png';
+import foundersHallGlowUrl from '../assets/sprites/founders_hall_glow.png';
 import libraryUrl from '../assets/sprites/library.png';
+import libraryGlowUrl from '../assets/sprites/library_glow.png';
 import stadiumUrl from '../assets/sprites/stadium.png';
+import stadiumGlowUrl from '../assets/sprites/stadium_glow.png';
 import unionHallUrl from '../assets/sprites/union_hall.png';
+import unionHallGlowUrl from '../assets/sprites/union_hall_glow.png';
 import { BuildingId } from '../sim/types';
 
 export type SpriteKey =
@@ -24,20 +34,22 @@ export type SpriteKey =
 
 export interface LoadedBuildingSprite {
   img: HTMLImageElement;
+  glowImg: HTMLImageElement;
   loaded: boolean;
+  glowLoaded: boolean;
 }
 
-const URLS: Record<SpriteKey, string> = {
-  bell_tower: bellTowerUrl,
-  founders_hall: foundersHallUrl,
-  union_hall: unionHallUrl,
-  library: libraryUrl,
-  stadium: stadiumUrl,
-  college_hall: collegeHallUrl,
-  college_blue: collegeBlueUrl,
-  college_purple: collegePurpleUrl,
-  college_teal: collegeTealUrl,
-  dorm_brick: dormBrickUrl,
+const URLS: Record<SpriteKey, { day: string; glow: string }> = {
+  bell_tower: { day: bellTowerUrl, glow: bellTowerGlowUrl },
+  founders_hall: { day: foundersHallUrl, glow: foundersHallGlowUrl },
+  union_hall: { day: unionHallUrl, glow: unionHallGlowUrl },
+  library: { day: libraryUrl, glow: libraryGlowUrl },
+  stadium: { day: stadiumUrl, glow: stadiumGlowUrl },
+  college_hall: { day: collegeHallUrl, glow: collegeHallGlowUrl },
+  college_blue: { day: collegeBlueUrl, glow: collegeBlueGlowUrl },
+  college_purple: { day: collegePurpleUrl, glow: collegePurpleGlowUrl },
+  college_teal: { day: collegeTealUrl, glow: collegeTealGlowUrl },
+  dorm_brick: { day: dormBrickUrl, glow: dormBrickGlowUrl },
 };
 
 const SPRITES: Partial<Record<SpriteKey, LoadedBuildingSprite>> = {};
@@ -47,11 +59,16 @@ export function initSpriteAtlas(): void {
   for (const key of Object.keys(URLS) as SpriteKey[]) {
     if (SPRITES[key]) continue;
     const img = new Image();
-    const entry: LoadedBuildingSprite = { img, loaded: false };
+    const glowImg = new Image();
+    const entry: LoadedBuildingSprite = { img, glowImg, loaded: false, glowLoaded: false };
     img.onload = () => {
       entry.loaded = true;
     };
-    img.src = URLS[key];
+    glowImg.onload = () => {
+      entry.glowLoaded = true;
+    };
+    img.src = URLS[key].day;
+    glowImg.src = URLS[key].glow;
     SPRITES[key] = entry;
   }
 }
@@ -62,21 +79,19 @@ export function getHeroSprite(key: SpriteKey): HTMLImageElement | null {
   return entry && entry.loaded && entry.img.naturalWidth > 0 ? entry.img : null;
 }
 
+export function getHeroGlowSprite(key: SpriteKey): HTMLImageElement | null {
+  if (!SPRITES[key]) initSpriteAtlas();
+  const entry = SPRITES[key];
+  return entry && entry.glowLoaded && entry.glowImg.naturalWidth > 0 ? entry.glowImg : null;
+}
+
 export interface HeroSpriteSpec {
   key: SpriteKey;
-  /** Target width multiplier relative to the isometric footprint width `(w + h) * 32` */
   widthFactor: number;
-  /** Vertical shift of bottom anchor relative to footprint south tip */
   footSinkPx: number;
-  /** Optional small rooftop badge drawn after sprite */
   rooftopAccent?: 'observatory' | 'antenna' | 'flag' | 'health_cross' | 'neon';
 }
 
-/**
- * Maps Bayou State buildings to our museum-grade 16-bit pixel-art PNG sprites.
- * Specialized open-air/utility buildings (water tower, arena, rec center w/ pool,
- * practice field, tiger habitat, surge barrier, rookery, pond) stay bespoke procedural pixel art.
- */
 export function getHeroSpriteSpec(type: BuildingId, tier: number): HeroSpriteSpec | null {
   switch (type) {
     case 'bell_tower':
@@ -92,7 +107,6 @@ export function getHeroSpriteSpec(type: BuildingId, tier: number): HeroSpriteSpe
     case 'stadium':
       return { key: 'stadium', widthFactor: 1.14, footSinkPx: 12 };
 
-    // Classic LSU Renaissance Revival Terracotta Colleges
     case 'lecture_hall':
     case 'humanities_college':
     case 'law_center':
@@ -100,7 +114,6 @@ export function getHeroSpriteSpec(type: BuildingId, tier: number): HeroSpriteSpe
     case 'nat_museum':
       return { key: 'college_hall', widthFactor: 1.04, footSinkPx: 6 };
 
-    // Slate-Blue Roofed STEM / Observatory / Media Colleges
     case 'engineering':
       return { key: 'college_blue', widthFactor: 1.05, footSinkPx: 6 };
     case 'science_college':
@@ -108,14 +121,12 @@ export function getHeroSpriteSpec(type: BuildingId, tier: number): HeroSpriteSpe
     case 'masscomm_school':
       return { key: 'college_blue', widthFactor: 1.04, footSinkPx: 6, rooftopAccent: 'antenna' };
 
-    // Bayou Copper-Teal Roofed Coastal & Health Colleges
     case 'coastal_institute':
     case 'wildlife_post':
       return { key: 'college_teal', widthFactor: 1.05, footSinkPx: 6 };
     case 'health_center':
       return { key: 'college_teal', widthFactor: 1.04, footSinkPx: 6, rooftopAccent: 'health_cross' };
 
-    // Royal Purple Roofed Commons, Business, Arts & College Town Flagships
     case 'union':
     case 'concert_hall':
     case 'boutique_hotel':
@@ -129,7 +140,6 @@ export function getHeroSpriteSpec(type: BuildingId, tier: number): HeroSpriteSpe
     case 'music_club':
       return { key: 'college_purple', widthFactor: 1.02, footSinkPx: 6, rooftopAccent: 'neon' };
 
-    // Warm Rose-Terracotta Brick Dorms, Ag, Vet, Education & College Town Lofts
     case 'dorm':
     case 'res_tower':
     case 'student_lofts':

@@ -1,6 +1,6 @@
 import { CATALOG } from '../sim/catalog';
 import { BuildingId, BuildingInstance, GameState, VegInstance } from '../sim/types';
-import { drawPoly, footprintCorners } from './iso';
+import { footprintCorners } from './iso';
 import {
   bayer4,
   CachedSprite,
@@ -15,7 +15,7 @@ import {
   RGBA,
   shadeRGBA,
 } from './pixel';
-import { getHeroSprite, getHeroSpriteSpec, initSpriteAtlas } from './sprites';
+import { getHeroGlowSprite, getHeroSprite, getHeroSpriteSpec, initSpriteAtlas } from './sprites';
 
 initSpriteAtlas();
 
@@ -104,24 +104,6 @@ function getBuildingSprite(
   const pb = new PixelBuffer(canvasW, canvasH);
   const cx = anchorX;
   const baseY = onPilings ? anchorY - 12 : anchorY;
-
-  // Grounded pixel-dithered SE cast shadow (drawn before outline pass so shadows stay clean!)
-  const fp = pxFootprint(cx, anchorY, w, h, 0.04);
-  const shDist = type === 'bell_tower' ? 32 : Math.min(28, 10 + span * 5);
-  const shY = Math.round(shDist * 0.34);
-  if (type !== 'practice_field' && type !== 'pond' && type !== 'rookery') {
-    pb.fillPoly(
-      [
-        fp.n,
-        [fp.n[0] + shDist, fp.n[1] + shY],
-        [fp.e[0] + shDist, fp.e[1] + shY],
-        [fp.s[0] + shDist, fp.s[1] + shY],
-        fp.s,
-        fp.e,
-      ],
-      (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow,
-    );
-  }
 
   // Timber Pilings / Stilts (+6 ft flood immunity!)
   if (onPilings) {
@@ -394,29 +376,58 @@ function getBuildingSprite(
     }
 
     case 'rec_center': {
-      drawPxPrism(pb, cx - 10, baseY - 4, w * 0.60, h * 0.90, 20, '#e8e4da', '#2e88b5', {
+      // Grand LSU Natatorium Pavilion + Sunlit Olympic Swimming Pool & Striped Patio Umbrellas!
+      drawPxPrism(pb, cx - 14, baseY - 5, w * 0.56, h * 0.90, 24, warmStone, '#3d72a8', {
         windows: true,
+        arches: true,
         nightLit,
       });
-      drawPxHippedRoof(pb, cx - 10, baseY - 24, w * 0.60, h * 0.90, 9, '#2e88b5', 0.02);
-      const pDeck = pxFootprint(cx + 16, baseY + 6, w * 0.42, h * 0.72, 0.04);
-      pb.fillPoly([pDeck.n, pDeck.e, pDeck.s, pDeck.w], PAL.stoneHi);
-      const pWat = pxFootprint(cx + 16, baseY + 6, w * 0.34, h * 0.58, 0.06);
-      pb.fillPoly([pWat.n, pWat.e, pWat.s, pWat.w], (x, y) => ((x + y) % 5 === 0 ? PAL.waterSpark : PAL.waterHi));
+      drawPxHippedRoof(pb, cx - 14, baseY - 29, w * 0.56, h * 0.90, 12, '#3d72a8', 0.01);
+      // Warm cream limestone pool terrace + coping border
+      const pDeck = pxFootprint(cx + 18, baseY + 8, w * 0.48, h * 0.80, 0.03);
+      pb.fillPoly([pDeck.n, pDeck.e, pDeck.s, pDeck.w], (x, y) => ((x + y) % 5 === 0 ? PAL.stoneMid : PAL.stoneHi));
+      pb.strokePoly([pDeck.n, pDeck.e, pDeck.s, pDeck.w], PAL.outlineSoft);
+      // Sparkling turquoise Olympic pool with lane lines!
+      const pWat = pxFootprint(cx + 18, baseY + 8, w * 0.36, h * 0.60, 0.05);
+      pb.fillPoly([pWat.n, pWat.e, pWat.s, pWat.w], (x, y) => {
+        if ((x - y * 2) % 9 === 0) return PAL.waterSpark;
+        return bayer4(x, y) > 0.65 ? PAL.waterHi : PAL.waterMid;
+      });
+      pb.strokePoly([pWat.n, pWat.e, pWat.s, pWat.w], PAL.waterAbyss);
+      // Cheerful LSU Purple & Gold striped poolside umbrellas!
+      for (const [ux, uy] of [[cx + 2, baseY + 14], [cx + 24, baseY - 4]] as [number, number][]) {
+        pb.line(ux, uy, ux, uy - 9, PAL.woodDark);
+        pb.fillEllipse(ux, uy - 9, 6, 4, (x, _y) => ((x - ux) & 2 ? PAL.purpleLit : PAL.goldHi));
+      }
       break;
     }
 
     case 'parking': {
+      // LSU Italian Renaissance Revival Architectural Parking Garage (arched cream limestone + stairwell tower!)
       const floors = tier >= 2 ? 4 : tier === 1 ? 3 : 2;
-      const bh = floors * 10;
-      drawPxPrism(pb, cx, baseY, w, h, bh, '#c4bfb4', '#9e9b95', { inset: 0.06 });
-      const bot = pxFootprint(cx, baseY, w, h, 0.06);
+      const bh = floors * 10 + 4;
+      drawPxPrism(pb, cx, baseY, w, h, bh, warmStone, '#b8b0a2', { inset: 0.05, arches: true, cornice: true });
+      const bot = pxFootprint(cx, baseY, w, h, 0.05);
+      const carColors = [PAL.purpleLit, PAL.goldLit, hexToRGBA('#d9483b'), hexToRGBA('#3b88c9')];
       for (let fl = 1; fl <= floors; fl++) {
-        const dy = fl * 10 - 4;
-        pb.line(bot.w[0] + 2, bot.w[1] - dy, bot.s[0] - 2, bot.s[1] - dy, PAL.archDark);
-        pb.line(bot.w[0] + 2, bot.w[1] - dy - 1, bot.s[0] - 2, bot.s[1] - dy - 1, PAL.archDark);
-        pb.line(bot.s[0] + 2, bot.s[1] - dy, bot.e[0] - 2, bot.e[1] - dy, PAL.archDark);
+        const dy = fl * 10 - 2;
+        // Shaded open concrete parking bays with little colorful parked pixel cars!
+        pb.line(bot.w[0] + 3, bot.w[1] - dy, bot.s[0] - 3, bot.s[1] - dy, PAL.archDark);
+        pb.line(bot.w[0] + 3, bot.w[1] - dy - 1, bot.s[0] - 3, bot.s[1] - dy - 1, PAL.archDark);
+        pb.line(bot.w[0] + 3, bot.w[1] - dy - 2, bot.s[0] - 3, bot.s[1] - dy - 2, PAL.archDark);
+        pb.line(bot.s[0] + 3, bot.s[1] - dy, bot.e[0] - 3, bot.e[1] - dy, PAL.archDark);
+        pb.line(bot.s[0] + 3, bot.s[1] - dy - 1, bot.e[0] - 3, bot.e[1] - dy - 1, PAL.archDark);
+        // Parked cars peeking between cream columns
+        for (let c = 0; c < 3; c++) {
+          const t = 0.22 + c * 0.26;
+          const px0 = Math.round(bot.w[0] + (bot.s[0] - bot.w[0]) * t);
+          const py0 = Math.round(bot.w[1] + (bot.s[1] - bot.w[1]) * t - dy);
+          pb.rect(px0 - 2, py0 - 2, 4, 2, carColors[(fl + c) % carColors.length]);
+        }
       }
+      // Classic terracotta-roofed corner stairwell pavilion on top deck!
+      drawPxPrism(pb, bot.n[0] + 4, bot.n[1] - bh + 8, 0.65, 0.65, 13, warmStone, terra, { inset: 0.04, windows: true, nightLit });
+      drawPxHippedRoof(pb, bot.n[0] + 4, bot.n[1] - bh - 5, 0.72, 0.72, 7, terra, 0.01);
       break;
     }
 
@@ -429,15 +440,36 @@ function getBuildingSprite(
     }
 
     case 'water_tower': {
-      for (const ox of [-10, 0, 10]) {
-        pb.line(cx + ox, baseY, cx + Math.round(ox * 0.65), baseY - 34, PAL.roadShade);
-        pb.line(cx + ox + 1, baseY, cx + Math.round(ox * 0.65) + 1, baseY - 34, PAL.roadHi);
+      // Iconic Tall Steel-Lattice LSU Varsity Water Tower with Catwalk & Conical Silver Cap!
+      const legs: [number, number][] = [[-13, 2], [-5, 6], [5, 6], [13, 2]];
+      for (const [ox, oy] of legs) {
+        // Concrete footing block
+        pb.rect(cx + ox - 2, baseY + oy - 2, 4, 3, PAL.stoneMid);
+        // Angled dark steel trestle leg
+        pb.line(cx + ox, baseY + oy - 2, cx + Math.round(ox * 0.68), baseY - 34, PAL.roadShade);
+        pb.line(cx + ox + 1, baseY + oy - 2, cx + Math.round(ox * 0.68) + 1, baseY - 34, PAL.roadHi);
       }
-      pb.line(cx - 9, baseY - 10, cx + 8, baseY - 22, PAL.roadHi);
-      pb.line(cx + 9, baseY - 10, cx - 8, baseY - 22, PAL.roadHi);
-      drawPxPrism(pb, cx, baseY - 32, 1.12, 1.12, 22, '#5e2ca5', '#7838c8', { inset: 0.08 });
-      drawPxPrism(pb, cx, baseY - 40, 1.15, 1.15, 5, '#f7c21b', '#ffe066', { inset: 0.08, cornice: false });
-      drawPxDome(pb, cx, baseY - 54, 21, 11, '#e8e0cc', true);
+      // Steel X-cross bracing
+      pb.line(cx - 11, baseY - 6, cx + 10, baseY - 19, PAL.roadHi);
+      pb.line(cx + 11, baseY - 6, cx - 10, baseY - 19, PAL.roadHi);
+      pb.line(cx - 9, baseY - 19, cx + 9, baseY - 32, PAL.roadHi);
+      pb.line(cx + 9, baseY - 19, cx - 9, baseY - 32, PAL.roadHi);
+      // Central riser pipe
+      pb.rect(cx - 2, baseY - 34, 4, 36, PAL.roadMid);
+      pb.line(cx - 2, baseY - 34, cx - 2, baseY + 2, PAL.stoneHi);
+      // Cylindrical steel catwalk ring
+      pb.fillEllipse(cx, baseY - 33, 22, 9, PAL.roadShade);
+      pb.fillEllipse(cx, baseY - 35, 20, 8, PAL.roadHi);
+      // Rounded Cylindrical Royal Purple & Gold Tank with specular highlight!
+      for (let ty = 0; ty < 22; ty++) {
+        const isGold = ty >= 8 && ty <= 13;
+        pb.fillEllipse(cx, baseY - 36 - ty, 17, 7, (x, _y, nx) => {
+          if (isGold) return nx < -0.2 ? PAL.goldHi : nx < 0.3 ? PAL.goldLit : PAL.goldShade;
+          return nx < -0.25 ? PAL.purpleHi : nx < 0.25 ? PAL.purpleLit : PAL.purpleDark;
+        });
+      }
+      // Conical ribbed silver-cream dome + finial!
+      drawPxDome(pb, cx, baseY - 58, 18, 12, '#e8e0cc', true);
       break;
     }
 
@@ -540,23 +572,44 @@ function getBuildingSprite(
     }
 
     case 'arena': {
-      const rx = Math.round(w * 14.5);
-      pb.fillEllipse(cx, baseY - 2, rx, Math.round(rx * 0.48), PAL.purpleLit);
-      pb.fillEllipse(cx, baseY - 6, rx, Math.round(rx * 0.46), PAL.goldLit);
-      drawPxDome(pb, cx, baseY - 12, rx, Math.round(rx * 0.56), '#ede6d4', false);
+      // THE ASSEMBLY — Monumental Circular Colonnaded Basketball Arena w/ Ribbed Saucer Dome!
+      const rx = Math.round(w * 15.5);
+      const ry = Math.round(rx * 0.48);
+      // Cream limestone cylindrical drum with shaded side + dark arched entrance bays!
+      for (let dy = 0; dy < 16; dy++) {
+        pb.fillEllipse(cx, baseY - dy, rx, ry, (x, _y, nx) => {
+          const isArch = dy >= 2 && dy <= 10 && Math.abs(((x - cx) % 10 + 10) % 10 - 5) <= 2 && nx > -0.85 && nx < 0.85;
+          if (isArch) return nightLit ? PAL.winNight : PAL.archDark;
+          return nx < -0.1 ? PAL.stuccoHi : nx < 0.35 ? PAL.stuccoMid : PAL.stuccoShade;
+        });
+      }
+      // Bold LSU Royal Purple & Bright Gold Fascia Rings!
+      pb.fillEllipse(cx, baseY - 16, rx + 1, ry + 1, (_x, _y, nx) => (nx < 0 ? PAL.purpleHi : PAL.purpleDark));
+      pb.fillEllipse(cx, baseY - 19, rx + 1, ry + 1, (_x, _y, nx) => (nx < 0 ? PAL.goldHi : PAL.goldMid));
+      // Radially ribbed white-concrete saucer dome + golden lantern oculus!
+      drawPxDome(pb, cx, baseY - 21, rx, Math.round(rx * 0.54), '#f2ead8', true);
       break;
     }
 
     case 'tiger_habitat': {
-      drawPxPrism(pb, cx, baseY, w, h, 8, '#d4c6a8', '#529e3a', { inset: 0.04, brickTex: true });
-      const pool = pxFootprint(cx + 8, baseY - 6, w * 0.44, h * 0.48, 0.04);
+      // ROUX'S TIGER SANCTUARY — Limestone Arched Wall, Waterfall Rock Grotto, Turquoise Lagoon & Palms!
+      drawPxPrism(pb, cx, baseY, w, h, 9, warmStone, '#48b52c', { inset: 0.03, brickTex: true, arches: true });
+      // Sparkling turquoise swimming lagoon inside sanctuary
+      const pool = pxFootprint(cx + 10, baseY - 7, w * 0.44, h * 0.50, 0.04);
       pb.fillPoly([pool.n, pool.e, pool.s, pool.w], (x, y) => ((x + y) % 4 === 0 ? PAL.waterSpark : PAL.waterHi));
-      drawPxDome(pb, cx - 10, baseY - 10, 12, 9, '#b5a892', false);
-      pb.rect(cx - 13, baseY - 14, 6, 5, PAL.archDark);
-      // Lush sanctuary palm & tropical shrub clusters inside the habitat!
-      for (const [bx, by] of [[-24, -4], [22, -14], [-4, -22], [18, 4]] as [number, number][]) {
-        pb.fillEllipse(cx + bx, baseY + by, 6, 4, PAL.grassShade);
-        pb.fillEllipse(cx + bx - 1, baseY + by - 2, 5, 3, PAL.grassHi);
+      pb.strokePoly([pool.n, pool.e, pool.s, pool.w], PAL.waterAbyss);
+      // Naturalistic terraced rock cave grotto + cascading white waterfall!
+      drawPxDome(pb, cx - 12, baseY - 11, 14, 10, '#a69884', false);
+      pb.rect(cx - 16, baseY - 15, 7, 6, PAL.archDark);
+      pb.rect(cx - 2, baseY - 14, 4, 8, PAL.waterSpark);
+      pb.rect(cx - 1, baseY - 14, 2, 8, PAL.waterHi);
+      // Lush tropical sanctuary palms & azalea blossoms!
+      for (const [bx, by] of [[-26, -6], [24, -15], [-4, -24], [19, 5], [-18, 8]] as [number, number][]) {
+        pb.line(cx + bx, baseY + by + 2, cx + bx, baseY + by - 8, PAL.woodShade);
+        pb.fillEllipse(cx + bx, baseY + by - 8, 7, 5, (x, y, nx, ny) => {
+          if (hash2(x + bx, y) > 0.85) return PAL.azaleaHi;
+          return -nx - ny > 0 ? PAL.grassHi : PAL.grassDark;
+        });
       }
       break;
     }
@@ -661,24 +714,8 @@ export function drawBuilding2D(
   const heroImg = heroSpec ? getHeroSprite(heroSpec.key) : null;
 
   if (heroSpec && heroImg) {
-    // 1. Rich grounded SE cast shadow on the emerald grass / brick underneath!
-    const fp = footprintCorners(cx, baseY, b.w, b.h, 0.04);
-    const shDist = b.type === 'bell_tower' ? 38 : Math.min(34, 14 + Math.max(b.w, b.h) * 6);
-    const shY = Math.round(shDist * 0.34);
-    drawPoly(
-      ctx,
-      [
-        fp.n,
-        [fp.n[0] + shDist, fp.n[1] + shY],
-        [fp.e[0] + shDist, fp.e[1] + shY],
-        [fp.s[0] + shDist, fp.s[1] + shY],
-        fp.s,
-        fp.e,
-      ],
-      'rgba(18, 30, 32, 0.44)',
-    );
-
-    // 2. Timber pilings stilts if elevated against bayou surge!
+    // (Cast ground shadow is drawn cleanly in Pass 1.5 Unified Shadow Mask!)
+    // 1. Timber pilings stilts if elevated against bayou surge!
     if (b.pilings) {
       const pC = footprintCorners(cx, baseY, b.w, b.h, 0.14);
       const pts: [number, number][] = [
@@ -696,7 +733,7 @@ export function drawBuilding2D(
       }
     }
 
-    // 3. Blit our museum-grade 16-bit PNG sprite razor-sharp onto the exact isometric footprint!
+    // 2. Blit our museum-grade 16-bit PNG sprite razor-sharp onto the exact isometric footprint!
     const footW = (b.w + b.h) * 32;
     const drawW = Math.round(footW * heroSpec.widthFactor);
     const drawH = Math.round((heroImg.naturalHeight / heroImg.naturalWidth) * drawW);
@@ -705,6 +742,18 @@ export function drawBuilding2D(
     const dy = Math.round(footSouthY - drawH);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(heroImg, dx, dy, drawW, drawH);
+
+    // 3. Pixel-exact warm golden night-window & floodlight glow overlay!
+    const gameNight = b.type === 'stadium' && state.football.active && state.football.nightGame;
+    if (nightLit || gameNight) {
+      const glowImg = getHeroGlowSprite(heroSpec.key);
+      if (glowImg) {
+        const prevAlpha = ctx.globalAlpha;
+        ctx.globalAlpha = gameNight ? 0.98 : Math.min(0.95, 0.45 + nightAmount * 0.55);
+        ctx.drawImage(glowImg, dx, dy, drawW, drawH);
+        ctx.globalAlpha = prevAlpha;
+      }
+    }
 
     // 4. Optional signature rooftop accents for specialized colleges
     if (heroSpec.rooftopAccent === 'observatory') {
@@ -912,11 +961,6 @@ function getTreeSprite(
 
   const pb = new PixelBuffer(w, h);
 
-  // Wide grounded dark-emerald SE cast shadow (exact match to Option 1 concept art!)
-  const shRx = isOak ? 28 : isCypress ? 16 : 8;
-  const shRy = isOak ? 11 : isCypress ? 7 : 4;
-  pb.fillEllipse(cx + 6, baseY + 2, shRx, shRy, (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow);
-
   if (isOak) {
     // Massive gnarled spreading Live Oak trunk, thick splayed surface roots & dark boughs!
     pb.fillPoly(
@@ -1085,43 +1129,42 @@ export function drawPixelStudent(
   shirt: 'purple' | 'gold' | 'white' | 'lavender',
   walkPhase: number,
   umbrella = false,
+  facingRight = true,
+  variant = 0,
 ): void {
-  const step = Math.floor(walkPhase) & 1;
-  const key = `stu2|${shirt}|${step}|u${umbrella ? 1 : 0}`;
+  const step = Math.floor(walkPhase) % 3;
+  const v = variant & 3;
+  const key = `stu4|${shirt}|${step}|u${umbrella ? 1 : 0}|f${facingRight ? 1 : 0}|v${v}`;
   let sp = entityCache.get(key);
   if (!sp) {
-    const hexMap: Record<typeof shirt, string> = {
-      purple: '#6e32c4',
-      gold: '#f7c21b',
-      white: '#e85a48',
-      lavender: '#369cd4',
+    const hexMap: Record<typeof shirt, string[]> = {
+      purple: ['#6e32c4', '#7d3bd6', '#56219e', '#8b45de'],
+      gold: ['#f7c21b', '#f59c24', '#ffe052', '#e0a214'],
+      white: ['#e85a48', '#f2e8cf', '#d94862', '#f08238'],
+      lavender: ['#369cd4', '#46b89e', '#9b72cf', '#3876c4'],
     };
-    const hairMap: Record<typeof shirt, string> = {
-      purple: '#3b241d',
-      gold: '#d49a42',
-      white: '#24181c',
-      lavender: '#6b3e26',
-    };
-    const shirtHex = hexMap[shirt];
+    const hairPalette = ['#3b241d', '#d49a42', '#21161c', '#7a3f24'];
+    const skinPalette = ['#f5c99b', '#e6b282', '#9e6844', '#f7d6b2'];
+    const shirtHex = hexMap[shirt][v];
     const pb = new PixelBuffer(16, 22);
     const col = hexToRGBA(shirtHex);
     const colDark = shadeRGBA(shirtHex, 0.72);
-    // Crisp dark ground shadow
-    pb.fillEllipse(8, 19, 4, 2, PAL.shadowDeep);
-    // Walking legs + little sneakers!
-    pb.rect(6, 14 + (step ? 0 : 1), 2, 4, hexToRGBA('#364d7a'));
-    pb.rect(8, 14 + (step ? 1 : 0), 2, 4, hexToRGBA('#253559'));
-    pb.px(6, 18 + (step ? 0 : 1), PAL.stuccoHi);
-    pb.px(9, 18 + (step ? 1 : 0), PAL.stuccoHi);
-    // Torso shirt + arms
+    const legA = step === 0 ? 0 : step === 1 ? 1 : -1;
+    const legB = -legA;
+    // Walking legs + sneakers (3-frame stride!)
+    pb.rect(6, 14 + Math.max(0, legA), 2, 4, hexToRGBA('#364d7a'));
+    pb.rect(8, 14 + Math.max(0, legB), 2, 4, hexToRGBA('#253559'));
+    pb.px(6, 18 + Math.max(0, legA), PAL.stuccoHi);
+    pb.px(9, 18 + Math.max(0, legB), PAL.stuccoHi);
+    // Torso shirt + shaded side
     pb.rect(5, 9, 6, 5, col);
-    pb.rect(8, 9, 3, 5, colDark);
-    // Little varsity backpack!
-    pb.rect(4, 9, 2, 4, PAL.goldLit);
-    // Distinct head + face + hair!
-    pb.rect(6, 4, 4, 5, hexToRGBA('#f5c99b'));
-    pb.rect(5, 3, 6, 3, hexToRGBA(hairMap[shirt]));
-    pb.px(9, 6, PAL.outline); // eye
+    pb.rect(facingRight ? 5 : 8, 9, 3, 5, colDark);
+    // Varsity backpack on trailing shoulder!
+    pb.rect(facingRight ? 4 : 10, 9, 2, 4, v % 2 === 0 ? PAL.goldLit : PAL.purpleLit);
+    // Head + skin + hair + eye direction
+    pb.rect(6, 4, 4, 5, hexToRGBA(skinPalette[v]));
+    pb.rect(5, 3, 6, 3, hexToRGBA(hairPalette[v]));
+    pb.px(facingRight ? 9 : 6, 6, PAL.outline);
     if (umbrella) {
       pb.fillEllipse(8, 4, 6, 3, PAL.purpleHi);
     }

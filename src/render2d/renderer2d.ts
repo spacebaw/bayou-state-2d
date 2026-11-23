@@ -29,6 +29,7 @@ import {
 } from './iso';
 import {
   CachedSprite,
+  drawPxHippedRoof,
   drawPxPrism,
   getTerrainAtlas,
   PAL,
@@ -48,20 +49,22 @@ interface Particle2D {
 
 const structCache = new Map<string, CachedSprite>();
 
-function getStructureSprite(kind: 'levee' | 'floodwall' | 'floodgate_open' | 'floodgate_closed' | 'fence'): CachedSprite {
+function getStructureSprite(
+  kind: 'levee' | 'floodwall' | 'floodgate_open' | 'floodgate_closed' | 'fence' | 'breezeway_x' | 'breezeway_y',
+): CachedSprite {
   const hit = structCache.get(kind);
   if (hit) return hit;
 
-  const pb = new PixelBuffer(72, 64);
-  const cx = 36;
-  const by = 44;
+  const pb = new PixelBuffer(76, 68);
+  const cx = 38;
+  const by = 48;
 
   if (kind === 'levee') {
-    drawPxPrism(pb, cx, by, 1.0, 1.0, 12, '#629c3a', '#75bf45', { inset: 0.02, cornice: false, castShadow: true });
+    drawPxPrism(pb, cx, by, 1.0, 1.0, 12, '#629c3a', '#75bf45', { inset: 0.02, cornice: false });
     pb.line(cx - 30, by + 1, cx, by + 15, PAL.cliffMid);
     pb.line(cx, by + 15, cx + 30, by + 1, PAL.cliffDark);
   } else if (kind === 'floodwall') {
-    drawPxPrism(pb, cx, by, 0.94, 0.94, 21, '#b8bec7', '#d8dee6', { inset: 0.08, cornice: true, castShadow: true });
+    drawPxPrism(pb, cx, by, 0.94, 0.94, 21, '#b8bec7', '#d8dee6', { inset: 0.08, cornice: true });
     pb.line(cx - 10, by - 12, cx - 10, by + 6, PAL.roadShade);
     pb.line(cx + 10, by - 12, cx + 10, by + 6, PAL.roadShade);
   } else if (kind === 'floodgate_open' || kind === 'floodgate_closed') {
@@ -71,6 +74,12 @@ function getStructureSprite(kind: 'levee' | 'floodwall' | 'floodgate_open' | 'fl
       drawPxPrism(pb, cx, by, 0.88, 0.34, 21, '#d95432', '#f2784b', { inset: 0.04, cornice: false });
       pb.line(cx - 12, by - 12, cx + 12, by - 4, PAL.goldHi);
     }
+  } else if (kind === 'breezeway_x' || kind === 'breezeway_y') {
+    // Iconic LSU Theodore Link Covered Terracotta Arched Colonnade Breezeway!
+    const bw = kind === 'breezeway_x' ? 0.98 : 0.62;
+    const bh = kind === 'breezeway_x' ? 0.62 : 0.98;
+    drawPxPrism(pb, cx, by, bw, bh, 14, '#f0dcb4', '#d95e38', { inset: 0.02, arches: true, cornice: true });
+    drawPxHippedRoof(pb, cx, by - 14, bw + 0.06, bh + 0.06, 9, '#d95e38', 0.0);
   } else if (kind === 'fence') {
     for (const [ox, oy] of [[-12, -2], [0, 4], [12, -2]] as [number, number][]) {
       pb.rect(cx + ox - 1, by + oy - 11, 2, 11, PAL.roadShade);
@@ -92,6 +101,8 @@ export class Renderer2D {
   readonly ctx: CanvasRenderingContext2D;
   private readonly pxCanvas: HTMLCanvasElement;
   private readonly pxCtx: CanvasRenderingContext2D;
+  private readonly shadowCanvas: HTMLCanvasElement;
+  private readonly shadowCtx: CanvasRenderingContext2D;
   readonly camera: Camera2D;
   private readonly container: HTMLElement;
   private viewW = 1280;
@@ -116,6 +127,10 @@ export class Renderer2D {
     this.pxCtx = this.pxCanvas.getContext('2d')!;
     this.pxCtx.imageSmoothingEnabled = false;
 
+    this.shadowCanvas = document.createElement('canvas');
+    this.shadowCtx = this.shadowCanvas.getContext('2d')!;
+    this.shadowCtx.imageSmoothingEnabled = false;
+
     this.camera = new Camera2D();
     this.onResize();
     window.addEventListener('resize', this.onResize);
@@ -129,8 +144,11 @@ export class Renderer2D {
     this.canvas.height = Math.round(this.viewH * dpr);
     this.pxCanvas.width = Math.max(320, Math.round(this.viewW / this.pxScale));
     this.pxCanvas.height = Math.max(200, Math.round(this.viewH / this.pxScale));
+    this.shadowCanvas.width = this.pxCanvas.width;
+    this.shadowCanvas.height = this.pxCanvas.height;
     this.ctx.imageSmoothingEnabled = false;
     this.pxCtx.imageSmoothingEnabled = false;
+    this.shadowCtx.imageSmoothingEnabled = false;
   };
 
   getSize(): { w: number; h: number } {
@@ -334,46 +352,85 @@ export class Renderer2D {
 
         ctx.drawImage(tileSprite.canvas, ix - 32, iy - 16);
 
-        // Lush concept-art overhanging emerald bayou banks, cattail reeds & lily pads!
+        // Organic 16-state auto-tiled Bayou Riverbanks: exposed earthen cliff + overhanging emerald grass lip + reeds & lily pads!
         if (isWater) {
-          const landN = inBounds(tx, ty - 1) && (tiles.flags[idx(tx, ty - 1)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
-          const landW = inBounds(tx - 1, ty) && (tiles.flags[idx(tx - 1, ty)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
-          if (landN || landW) {
-            // Deep water bank shadow + crisp foam glint
-            ctx.strokeStyle = '#183d4d';
+          const isLand = (nx: number, ny: number): boolean =>
+            inBounds(nx, ny) && (tiles.flags[idx(nx, ny)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
+          const landN = isLand(tx, ty - 1);
+          const landW = isLand(tx - 1, ty);
+          const landS = isLand(tx, ty + 1);
+          const landE = isLand(tx + 1, ty);
+
+          if (landN) {
+            // Exposed earthen mud bank + dark turquoise water shadow + wavy overhanging emerald grass fringe!
+            drawPoly(ctx, [cN, cE, [cE[0], cE[1] + 5], [cN[0], cN[1] + 5]], '#6e4d32', '#23152b', 1);
+            ctx.strokeStyle = '#40a628';
             ctx.lineWidth = 3;
             ctx.beginPath();
-            if (landN) { ctx.moveTo(cN[0], cN[1] + 2); ctx.lineTo(cE[0] - 2, cE[1] + 2); }
-            if (landW) { ctx.moveTo(cN[0], cN[1] + 2); ctx.lineTo(cW[0] + 2, cW[1] + 2); }
+            ctx.moveTo(cN[0] + 1, cN[1] + 1);
+            ctx.lineTo(cE[0] - 1, cE[1] + 1);
             ctx.stroke();
-
             ctx.strokeStyle = 'rgba(184, 255, 247, 0.85)';
             ctx.lineWidth = 1.5;
             ctx.beginPath();
-            if (landN) { ctx.moveTo(cN[0] + 2, cN[1] + 4); ctx.lineTo(cE[0] - 4, cE[1] + 4); }
-            if (landW) { ctx.moveTo(cN[0] - 2, cN[1] + 4); ctx.lineTo(cW[0] + 4, cW[1] + 4); }
+            ctx.moveTo(cN[0] + 3, cN[1] + 7);
+            ctx.lineTo(cE[0] - 3, cE[1] + 7);
             ctx.stroke();
+          }
+          if (landW) {
+            drawPoly(ctx, [cW, cN, [cN[0], cN[1] + 5], [cW[0], cW[1] + 5]], '#523828', '#23152b', 1);
+            ctx.strokeStyle = '#52bf30';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cW[0] + 1, cW[1] + 1);
+            ctx.lineTo(cN[0] - 1, cN[1] + 1);
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(184, 255, 247, 0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(cW[0] + 3, cW[1] + 7);
+            ctx.lineTo(cN[0] - 3, cN[1] + 7);
+            ctx.stroke();
+          }
+          if (landS) {
+            // Subtle dark-outlined foreground bank edge where emerald grass hugs the south bank
+            ctx.strokeStyle = '#23152b';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cW[0], cW[1]);
+            ctx.lineTo(cS[0], cS[1]);
+            ctx.stroke();
+          }
+          if (landE) {
+            ctx.strokeStyle = '#23152b';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cS[0], cS[1]);
+            ctx.lineTo(cE[0], cE[1]);
+            ctx.stroke();
+          }
 
-            // Tiny pixel cattail reeds & marsh grasses poking along bayou shore!
-            if ((tx * 7 + ty * 11) % 3 === 0) {
-              const rx = landN ? ix + 10 : ix - 12;
-              const ry = iy - 5;
-              ctx.fillStyle = '#23152b';
-              ctx.fillRect(rx - 2, ry - 9, 7, 10);
-              ctx.fillStyle = '#3ca128';
-              ctx.fillRect(rx - 1, ry - 8, 2, 8);
-              ctx.fillRect(rx + 2, ry - 6, 2, 6);
-              ctx.fillStyle = '#7a4424';
-              ctx.fillRect(rx - 1, ry - 9, 2, 3); // brown cattail head!
-            }
-          } else if ((tx * 13 + ty * 7) % 11 === 0) {
-            // Floating bright green lily pads on calm bayou water!
+          if ((landN || landW) && (tx * 7 + ty * 11) % 2 === 0) {
+            // Lush pixel cattail & marsh reed cluster along bank!
+            const rx = landN ? ix + 9 : ix - 11;
+            const ry = iy - 4;
             ctx.fillStyle = '#23152b';
-            ctx.fillRect(ix - 5, iy - 2, 10, 6);
+            ctx.fillRect(rx - 3, ry - 11, 9, 12);
+            ctx.fillStyle = '#3ca128';
+            ctx.fillRect(rx - 2, ry - 9, 2, 9);
+            ctx.fillRect(rx + 1, ry - 10, 2, 10);
+            ctx.fillRect(rx + 4, ry - 7, 2, 7);
+            ctx.fillStyle = '#7a4424';
+            ctx.fillRect(rx + 1, ry - 11, 2, 4);
+            ctx.fillRect(rx - 2, ry - 9, 2, 3);
+          } else if (!landN && !landW && (tx * 13 + ty * 7) % 9 === 0) {
+            // Floating bright green lily pad cluster w/ pink lotus blossom!
+            ctx.fillStyle = '#23152b';
+            ctx.fillRect(ix - 6, iy - 2, 11, 6);
             ctx.fillStyle = '#52bf30';
-            ctx.fillRect(ix - 4, iy - 1, 8, 4);
+            ctx.fillRect(ix - 5, iy - 1, 9, 4);
             ctx.fillStyle = '#ff7eb6';
-            ctx.fillRect(ix - 1, iy - 2, 3, 2);
+            ctx.fillRect(ix - 2, iy - 2, 3, 2);
           }
         }
 
@@ -442,11 +499,86 @@ export class Renderer2D {
       }
     }
 
+    // ===== PASS 1.5: UNIFIED SUNLIT GROUND SHADOW PASS (ZERO OVERLAPPING DARK BLOBS!) =====
+    const sCtx = this.shadowCtx;
+    sCtx.save();
+    sCtx.setTransform(1, 0, 0, 1, 0, 0);
+    sCtx.clearRect(0, 0, pw, ph);
+    sCtx.translate(Math.round(pw * 0.5 + shakeX), Math.round(ph * 0.5 + shakeY));
+    sCtx.scale(z, z);
+    sCtx.translate(Math.round(-this.camera.x), Math.round(-this.camera.y));
+    sCtx.fillStyle = '#0c201b';
+
+    // Building SE cast shadows (sun from upper-left!)
+    for (const b of state.buildings) {
+      if (!b || b.type === 'practice_field' || b.type === 'pond' || b.type === 'rookery') continue;
+      let maxElev = 0;
+      for (let dy = 0; dy < b.h; dy++) {
+        for (let dx = 0; dx < b.w; dx++) {
+          const ii = idx(b.tx + dx, b.ty + dy);
+          if (tiles.elev[ii] > maxElev) maxElev = tiles.elev[ii];
+        }
+      }
+      const p = tileToIso(b.tx + b.w * 0.5, b.ty + b.h * 0.5, maxElev);
+      if (p.x < minWX - 140 || p.x > maxWX + 140 || p.y < minWY - 160 || p.y > maxWY + 160) continue;
+      const fp = footprintCorners(p.x, p.y, b.w, b.h, 0.04);
+      const shDist = b.type === 'bell_tower' ? 42 : Math.min(36, 15 + Math.max(b.w, b.h) * 6);
+      const shY = Math.round(shDist * 0.34);
+      drawPoly(
+        sCtx,
+        [
+          fp.n,
+          [fp.n[0] + shDist, fp.n[1] + shY],
+          [fp.e[0] + shDist, fp.e[1] + shY],
+          [fp.s[0] + shDist, fp.s[1] + shY],
+          fp.s,
+          fp.e,
+        ],
+        '#0c201b',
+      );
+    }
+
+    // Tree canopy ground shadows
+    for (const tree of state.veg) {
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.tx)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.ty)));
+      const elev = Math.max(0.25, tiles.elev[idx(txI, tyI)]);
+      const p = tileToIso(tree.tx, tree.ty, elev);
+      if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
+      const rx = tree.kind === 'oak' ? 29 : tree.kind === 'cypress' ? 17 : 8;
+      const ry = tree.kind === 'oak' ? 12 : tree.kind === 'cypress' ? 7 : 4;
+      sCtx.beginPath();
+      sCtx.ellipse(Math.round(p.x + 7), Math.round(p.y + 2), rx, ry, 0, 0, Math.PI * 2);
+      sCtx.fill();
+    }
+
+    // Student drop shadows
+    for (const s of state.agents) {
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.x)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.y)));
+      const tileI = idx(txI, tyI);
+      const isBoard = tiles.surface[tileI] === SurfaceType.Boardwalk || tiles.surface[tileI] === SurfaceType.Bridge;
+      const elev = isBoard ? Math.max(tiles.elev[tileI], waterStage + 0.9) : Math.max(0.25, tiles.elev[tileI]);
+      const p = tileToIso(s.x, s.y, elev);
+      if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
+      sCtx.beginPath();
+      sCtx.ellipse(Math.round(p.x + 2), Math.round(p.y + 1), 4, 2, 0, 0, Math.PI * 2);
+      sCtx.fill();
+    }
+    sCtx.restore();
+
+    // Composite unified ground shadow mask ONCE cleanly over terrain & brick paths!
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = Math.max(0.14, 0.34 * (1 - night * 0.55) * (1 - storm * 0.35));
+    ctx.drawImage(this.shadowCanvas, 0, 0);
+    ctx.restore();
+
     // ===== PASS 2: DEPTH-SORTED 16-BIT SPRITES =====
     type RenderItem = { depth: number; draw: () => void };
     const items: RenderItem[] = [];
 
-    // 2a. Levees, Floodwalls, Floodgates, Gator Fences
+    // 2a. Levees, Floodwalls, Floodgates, Gator Fences & Auto-Linked LSU Covered Breezeways!
     for (let ty = 0; ty < MAP_SIZE; ty++) {
       for (let tx = 0; tx < MAP_SIZE; tx++) {
         const i = idx(tx, ty);
@@ -455,7 +587,19 @@ export class Renderer2D {
         const hasWall = (f & TileFlag.Floodwall) !== 0;
         const hasGate = (f & TileFlag.Floodgate) !== 0;
         const hasFence = tiles.surface[i] === SurfaceType.GatorFence;
-        if (!hasLevee && !hasWall && !hasGate && !hasFence) continue;
+
+        // Auto-link adjacent academic buildings with iconic LSU Covered Terracotta Arched Breezeways!
+        let breezeDir: 'breezeway_x' | 'breezeway_y' | null = null;
+        if (tiles.surface[i] === SurfaceType.Path && tiles.owner[i] === 0 && !hasLevee && !hasWall) {
+          const ownL = inBounds(tx - 1, ty) ? tiles.owner[idx(tx - 1, ty)] : 0;
+          const ownR = inBounds(tx + 1, ty) ? tiles.owner[idx(tx + 1, ty)] : 0;
+          const ownU = inBounds(tx, ty - 1) ? tiles.owner[idx(tx, ty - 1)] : 0;
+          const ownD = inBounds(tx, ty + 1) ? tiles.owner[idx(tx, ty + 1)] : 0;
+          if (ownL > 0 && ownR > 0 && ownL !== ownR) breezeDir = 'breezeway_x';
+          else if (ownU > 0 && ownD > 0 && ownU !== ownD) breezeDir = 'breezeway_y';
+        }
+
+        if (!hasLevee && !hasWall && !hasGate && !hasFence && !breezeDir) continue;
         const elev = tiles.elev[i];
         const p = tileToIso(tx + 0.5, ty + 0.5, elev);
         if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
@@ -463,13 +607,15 @@ export class Renderer2D {
         items.push({
           depth: tx + ty + 0.45,
           draw: () => {
-            const sp = hasGate
-              ? getStructureSprite(state.storm.active ? 'floodgate_closed' : 'floodgate_open')
-              : hasWall
-                ? getStructureSprite('floodwall')
-                : hasLevee
-                  ? getStructureSprite('levee')
-                  : getStructureSprite('fence');
+            const sp = breezeDir
+              ? getStructureSprite(breezeDir)
+              : hasGate
+                ? getStructureSprite(state.storm.active ? 'floodgate_closed' : 'floodgate_open')
+                : hasWall
+                  ? getStructureSprite('floodwall')
+                  : hasLevee
+                    ? getStructureSprite('levee')
+                    : getStructureSprite('fence');
             ctx.drawImage(sp.canvas, Math.round(p.x - sp.anchorX), Math.round(p.y - sp.anchorY));
           },
         });
@@ -512,7 +658,7 @@ export class Renderer2D {
       });
     }
 
-    // 2d. Roaming 16-Bit Pixel Students!
+    // 2d. Roaming 4-Direction Animated 16-Bit Pixel Students!
     for (const s of state.agents) {
       const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.x)));
       const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.y)));
@@ -521,14 +667,25 @@ export class Renderer2D {
       const elev = isBoard ? Math.max(tiles.elev[tileI], waterStage + 0.9) : Math.max(0.25, tiles.elev[tileI]);
       const p = tileToIso(s.x, s.y, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
+      const facingRight = (s.vx - s.vy) >= 0;
 
       items.push({
         depth: s.x + s.y + 0.05,
-        draw: () => drawPixelStudent(ctx, p.x, p.y, s.shirt, elapsed * 6 + s.phaseOffset, s.hasUmbrella && state.rainRate > 0.2),
+        draw: () =>
+          drawPixelStudent(
+            ctx,
+            p.x,
+            p.y,
+            s.shirt,
+            elapsed * 6.5 + s.phaseOffset,
+            s.hasUmbrella && state.rainRate > 0.2,
+            facingRight,
+            s.id,
+          ),
       });
     }
 
-    // 2e. Bayou Alligators!
+    // 2e. Bayou Alligators w/ Animated Swimming V-Wake Ripples!
     for (const g of state.gators) {
       const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.x)));
       const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.y)));
@@ -537,11 +694,22 @@ export class Renderer2D {
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
       items.push({
         depth: g.x + g.y,
-        draw: () => drawPixelGator(ctx, p.x, p.y, elapsed + g.id),
+        draw: () => {
+          // Animated sparkling V-wake ripples behind swimming gator!
+          const r = 4 + ((elapsed * 8 + g.id * 3) % 8);
+          ctx.strokeStyle = 'rgba(184, 255, 247, 0.72)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(p.x - 10 - r), Math.round(p.y - 3));
+          ctx.lineTo(Math.round(p.x - 6), Math.round(p.y + 1));
+          ctx.lineTo(Math.round(p.x - 10 - r), Math.round(p.y + 5));
+          ctx.stroke();
+          drawPixelGator(ctx, p.x, p.y, elapsed + g.id);
+        },
       });
     }
 
-    // 2f. Cajun Pirogues (along bayou spline!)
+    // 2f. Cajun Pirogues (along bayou spline w/ gentle water wakes!)
     const spline = state.plot.bayouSpline;
     if (spline.length >= 2) {
       for (const pr of state.pirogues) {
@@ -561,7 +729,17 @@ export class Renderer2D {
         if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
         items.push({
           depth: bx + by,
-          draw: () => drawPixelPirogue(ctx, p.x, p.y + bob, pr.cajunNavy),
+          draw: () => {
+            ctx.strokeStyle = 'rgba(184, 255, 247, 0.65)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(Math.round(p.x - 14), Math.round(p.y + 2));
+            ctx.lineTo(Math.round(p.x - 22), Math.round(p.y + 5));
+            ctx.moveTo(Math.round(p.x - 14), Math.round(p.y + 2));
+            ctx.lineTo(Math.round(p.x - 20), Math.round(p.y - 2));
+            ctx.stroke();
+            drawPixelPirogue(ctx, p.x, p.y + bob, pr.cajunNavy);
+          },
         });
       }
     }
@@ -836,12 +1014,15 @@ export class Renderer2D {
         ctx.fillStyle = '#9e6230';
         ctx.fillRect(ix - 6, iy - 1, 12, 2);
       } else if (qHash === 6) {
-        // Crisp silver campus bike rack!
+        // Campus bike rack populated with colorful tiny parked pixel bicycles!
         ctx.fillStyle = '#23152b';
-        for (let bx = -6; bx <= 6; bx += 4) {
-          ctx.fillRect(ix + bx, iy - 4, 3, 5);
+        for (let bx = -8; bx <= 6; bx += 5) {
+          ctx.fillRect(ix + bx, iy - 5, 4, 6);
           ctx.fillStyle = '#d4dce6';
-          ctx.fillRect(ix + bx, iy - 4, 2, 4);
+          ctx.fillRect(ix + bx + 1, iy - 4, 2, 4);
+          // Colorful parked bike frame!
+          ctx.fillStyle = bx === -8 ? '#e84848' : bx === -3 ? '#f7c21b' : '#46a8e0';
+          ctx.fillRect(ix + bx, iy - 6, 3, 2);
           ctx.fillStyle = '#23152b';
         }
       }
@@ -943,14 +1124,41 @@ export class Renderer2D {
           ctx.beginPath(); ctx.moveTo(dW[0], dW[1] - 3); ctx.lineTo(dS[0], dS[1] - 3); ctx.stroke();
         }
       } else {
+        // Concept-Art Arched Stone-and-Timber Footbridge w/ Wooden Planks, Lattice Railings & Stone Piers!
         ctx.strokeStyle = '#6e4628';
-        ctx.lineWidth = 1;
-        for (let k = -10; k <= 10; k += 5) {
+        ctx.lineWidth = 1.5;
+        for (let k = -12; k <= 12; k += 5) {
           ctx.beginPath();
           ctx.moveTo(ix + k - 8, dy + k * 0.5 + 4);
           ctx.lineTo(ix + k + 8, dy + k * 0.5 - 4);
           ctx.stroke();
         }
+        // Timber lattice handrail fences along exposed sides + stone corner posts!
+        const hasBW = (nx: number, ny: number): boolean =>
+          inBounds(nx, ny) && tiles.surface[idx(nx, ny)] === SurfaceType.Boardwalk;
+        const drawRail = (pA: [number, number], pB: [number, number]) => {
+          ctx.strokeStyle = '#23152b';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(pA[0], pA[1] - 7); ctx.lineTo(pB[0], pB[1] - 7); ctx.stroke();
+          ctx.strokeStyle = '#c4864b';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(pA[0], pA[1] - 7); ctx.lineTo(pB[0], pB[1] - 7); ctx.stroke();
+          // Vertical timber balusters + stone end pillars
+          for (let s = 0; s <= 3; s++) {
+            const t = s / 3;
+            const rx = Math.round(pA[0] + (pB[0] - pA[0]) * t);
+            const ry = Math.round(pA[1] + (pB[1] - pA[1]) * t);
+            const isPost = s === 0 || s === 3;
+            ctx.fillStyle = '#23152b';
+            ctx.fillRect(rx - (isPost ? 2 : 1), ry - (isPost ? 9 : 7), isPost ? 5 : 2, isPost ? 9 : 7);
+            ctx.fillStyle = isPost ? '#d6c6a5' : '#9e6b3b';
+            ctx.fillRect(rx - (isPost ? 1 : 0), ry - (isPost ? 8 : 6), isPost ? 3 : 1, isPost ? 7 : 5);
+          }
+        };
+        if (!hasBW(tx, ty - 1) && !isPathLike(tx, ty - 1)) drawRail(dN, dE);
+        if (!hasBW(tx, ty + 1) && !isPathLike(tx, ty + 1)) drawRail(dW, dS);
+        if (!hasBW(tx - 1, ty) && !isPathLike(tx - 1, ty)) drawRail(dW, dN);
+        if (!hasBW(tx + 1, ty) && !isPathLike(tx + 1, ty)) drawRail(dS, dE);
       }
     }
   }
