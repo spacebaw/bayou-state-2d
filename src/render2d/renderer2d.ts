@@ -96,7 +96,7 @@ export class Renderer2D {
   private readonly container: HTMLElement;
   private viewW = 1280;
   private viewH = 720;
-  private pxScale = 1.5; // Authentic crisp 16-bit virtual pixel density!
+  private pxScale = 1.0; // 1:1 razor-sharp pixel-art buffer for crisp architectural detail!
   private particles: Particle2D[] = [];
   private lastFireworkTick = -1;
   private confettiTimer = 0;
@@ -334,23 +334,46 @@ export class Renderer2D {
 
         ctx.drawImage(tileSprite.canvas, ix - 32, iy - 16);
 
-        // Sparkling pixel shoreline foam where water meets land!
+        // Lush concept-art overhanging emerald bayou banks, cattail reeds & lily pads!
         if (isWater) {
           const landN = inBounds(tx, ty - 1) && (tiles.flags[idx(tx, ty - 1)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
           const landW = inBounds(tx - 1, ty) && (tiles.flags[idx(tx - 1, ty)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
           if (landN || landW) {
-            ctx.strokeStyle = 'rgba(180, 248, 240, 0.72)';
-            ctx.lineWidth = 2;
+            // Deep water bank shadow + crisp foam glint
+            ctx.strokeStyle = '#183d4d';
+            ctx.lineWidth = 3;
             ctx.beginPath();
-            if (landN) {
-              ctx.moveTo(cN[0], cN[1] + 1);
-              ctx.lineTo(cE[0] - 2, cE[1] + 1);
-            }
-            if (landW) {
-              ctx.moveTo(cN[0], cN[1] + 1);
-              ctx.lineTo(cW[0] + 2, cW[1] + 1);
-            }
+            if (landN) { ctx.moveTo(cN[0], cN[1] + 2); ctx.lineTo(cE[0] - 2, cE[1] + 2); }
+            if (landW) { ctx.moveTo(cN[0], cN[1] + 2); ctx.lineTo(cW[0] + 2, cW[1] + 2); }
             ctx.stroke();
+
+            ctx.strokeStyle = 'rgba(184, 255, 247, 0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            if (landN) { ctx.moveTo(cN[0] + 2, cN[1] + 4); ctx.lineTo(cE[0] - 4, cE[1] + 4); }
+            if (landW) { ctx.moveTo(cN[0] - 2, cN[1] + 4); ctx.lineTo(cW[0] + 4, cW[1] + 4); }
+            ctx.stroke();
+
+            // Tiny pixel cattail reeds & marsh grasses poking along bayou shore!
+            if ((tx * 7 + ty * 11) % 3 === 0) {
+              const rx = landN ? ix + 10 : ix - 12;
+              const ry = iy - 5;
+              ctx.fillStyle = '#23152b';
+              ctx.fillRect(rx - 2, ry - 9, 7, 10);
+              ctx.fillStyle = '#3ca128';
+              ctx.fillRect(rx - 1, ry - 8, 2, 8);
+              ctx.fillRect(rx + 2, ry - 6, 2, 6);
+              ctx.fillStyle = '#7a4424';
+              ctx.fillRect(rx - 1, ry - 9, 2, 3); // brown cattail head!
+            }
+          } else if ((tx * 13 + ty * 7) % 11 === 0) {
+            // Floating bright green lily pads on calm bayou water!
+            ctx.fillStyle = '#23152b';
+            ctx.fillRect(ix - 5, iy - 2, 10, 6);
+            ctx.fillStyle = '#52bf30';
+            ctx.fillRect(ix - 4, iy - 1, 8, 4);
+            ctx.fillStyle = '#ff7eb6';
+            ctx.fillRect(ix - 1, iy - 2, 3, 2);
           }
         }
 
@@ -768,25 +791,59 @@ export class Renderer2D {
 
     if (surf === SurfaceType.Path) {
       ctx.drawImage(atlas.brick.canvas, ix - 32, iy - 16);
-      if ((tx + ty) % 6 === 0) {
+      // Crisp cream-stone edge curbs where brick meets open grass!
+      ctx.strokeStyle = '#e8dcc2';
+      ctx.lineWidth = 1.5;
+      if (!isPathLike(tx, ty - 1)) { ctx.beginPath(); ctx.moveTo(ix, iy - HALF_H); ctx.lineTo(ix + HALF_W, iy); ctx.stroke(); }
+      if (!isPathLike(tx - 1, ty)) { ctx.beginPath(); ctx.moveTo(ix, iy - HALF_H); ctx.lineTo(ix - HALF_W, iy); ctx.stroke(); }
+
+      const propHash = (tx * 7 + ty * 13) % 12;
+      if (propHash === 0) {
+        // Ornate black Victorian campus streetlamp!
         ctx.fillStyle = '#23152b';
-        ctx.fillRect(ix + 12, iy - 16, 2, 14);
-        ctx.fillStyle = night > 0.2 ? '#fff08a' : '#d8e0e8';
-        ctx.fillRect(ix + 11, iy - 18, 4, 3);
+        ctx.fillRect(ix + 11, iy - 20, 4, 18);
+        ctx.fillRect(ix + 10, iy - 22, 6, 4);
+        ctx.fillStyle = night > 0.2 ? '#fff08a' : '#f5ebd2';
+        ctx.fillRect(ix + 11, iy - 21, 4, 3);
         if (night > 0.2) {
-          lights.push({ x: ix + 13, y: iy - 16, r: 34, color: '255, 224, 130', alpha: night * 0.34 });
+          lights.push({ x: ix + 13, y: iy - 20, r: 40, color: '255, 224, 130', alpha: night * 0.38 });
         }
+      } else if (propHash === 5) {
+        // Purple & gold Bayou State campus wayfinding sign!
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(ix - 15, iy - 11, 2, 9);
+        ctx.fillRect(ix - 9, iy - 11, 2, 9);
+        ctx.fillRect(ix - 17, iy - 13, 12, 7);
+        ctx.fillStyle = '#6128a8';
+        ctx.fillRect(ix - 16, iy - 12, 10, 5);
+        ctx.fillStyle = '#ffe45e';
+        ctx.fillRect(ix - 14, iy - 10, 6, 2);
       }
       return;
     }
 
     if (surf === SurfaceType.Quad) {
       ctx.drawImage(atlas.quad.canvas, ix - 32, iy - 16);
-      if ((tx + ty) % 5 === 0) {
+      const qHash = (tx * 5 + ty * 9) % 10;
+      if (qHash === 0) {
+        // Slatted wooden campus park bench with dark cast-iron legs!
+        ctx.fillStyle = 'rgba(18, 30, 32, 0.35)';
+        ctx.fillRect(ix - 6, iy + 1, 14, 3);
         ctx.fillStyle = '#23152b';
-        ctx.fillRect(ix - 5, iy - 3, 10, 5);
-        ctx.fillStyle = '#b5743c';
-        ctx.fillRect(ix - 4, iy - 2, 8, 3);
+        ctx.fillRect(ix - 7, iy - 6, 14, 8);
+        ctx.fillStyle = '#c48143';
+        ctx.fillRect(ix - 6, iy - 5, 12, 3);
+        ctx.fillStyle = '#9e6230';
+        ctx.fillRect(ix - 6, iy - 1, 12, 2);
+      } else if (qHash === 6) {
+        // Crisp silver campus bike rack!
+        ctx.fillStyle = '#23152b';
+        for (let bx = -6; bx <= 6; bx += 4) {
+          ctx.fillRect(ix + bx, iy - 4, 3, 5);
+          ctx.fillStyle = '#d4dce6';
+          ctx.fillRect(ix + bx, iy - 4, 2, 4);
+          ctx.fillStyle = '#23152b';
+        }
       }
       return;
     }

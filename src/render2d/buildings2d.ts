@@ -1,5 +1,6 @@
 import { CATALOG } from '../sim/catalog';
 import { BuildingId, BuildingInstance, GameState, VegInstance } from '../sim/types';
+import { drawPoly, footprintCorners } from './iso';
 import {
   bayer4,
   CachedSprite,
@@ -11,8 +12,12 @@ import {
   PAL,
   PixelBuffer,
   pxFootprint,
+  RGBA,
   shadeRGBA,
 } from './pixel';
+import { getHeroSprite, getHeroSpriteSpec, initSpriteAtlas } from './sprites';
+
+initSpriteAtlas();
 
 export interface LightGlow {
   x: number;
@@ -650,22 +655,149 @@ export function drawBuilding2D(
 ): void {
   const underConstruction = b.built < 1;
   const nightLit = nightAmount > 0.22 && b.powered && !b.flooded && !b.blackout;
-  const sprite = getBuildingSprite(
-    b.type,
-    b.w,
-    b.h,
-    b.tier,
-    b.pilings,
-    nightLit,
-    underConstruction,
-    b.flooded,
-  );
-
-  const ix = Math.round(cx - sprite.anchorX);
-  const iy = Math.round(baseY - sprite.anchorY);
-  ctx.drawImage(sprite.canvas, ix, iy);
-
   const drawY = b.pilings ? baseY - 12 : baseY;
+
+  const heroSpec = !underConstruction ? getHeroSpriteSpec(b.type, b.tier) : null;
+  const heroImg = heroSpec ? getHeroSprite(heroSpec.key) : null;
+
+  if (heroSpec && heroImg) {
+    // 1. Rich grounded SE cast shadow on the emerald grass / brick underneath!
+    const fp = footprintCorners(cx, baseY, b.w, b.h, 0.04);
+    const shDist = b.type === 'bell_tower' ? 38 : Math.min(34, 14 + Math.max(b.w, b.h) * 6);
+    const shY = Math.round(shDist * 0.34);
+    drawPoly(
+      ctx,
+      [
+        fp.n,
+        [fp.n[0] + shDist, fp.n[1] + shY],
+        [fp.e[0] + shDist, fp.e[1] + shY],
+        [fp.s[0] + shDist, fp.s[1] + shY],
+        fp.s,
+        fp.e,
+      ],
+      'rgba(18, 30, 32, 0.44)',
+    );
+
+    // 2. Timber pilings stilts if elevated against bayou surge!
+    if (b.pilings) {
+      const pC = footprintCorners(cx, baseY, b.w, b.h, 0.14);
+      const pts: [number, number][] = [
+        pC.w,
+        pC.s,
+        pC.e,
+        [(pC.w[0] + pC.s[0]) * 0.5, (pC.w[1] + pC.s[1]) * 0.5],
+        [(pC.s[0] + pC.e[0]) * 0.5, (pC.s[1] + pC.e[1]) * 0.5],
+      ];
+      for (const [px0, py0] of pts) {
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(Math.round(px0 - 3), Math.round(py0 - 14), 6, 15);
+        ctx.fillStyle = '#ab713b';
+        ctx.fillRect(Math.round(px0 - 2), Math.round(py0 - 13), 4, 13);
+      }
+    }
+
+    // 3. Blit our museum-grade 16-bit PNG sprite razor-sharp onto the exact isometric footprint!
+    const footW = (b.w + b.h) * 32;
+    const drawW = Math.round(footW * heroSpec.widthFactor);
+    const drawH = Math.round((heroImg.naturalHeight / heroImg.naturalWidth) * drawW);
+    const footSouthY = drawY + (b.w + b.h) * 8 + heroSpec.footSinkPx;
+    const dx = Math.round(cx - drawW * 0.5);
+    const dy = Math.round(footSouthY - drawH);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(heroImg, dx, dy, drawW, drawH);
+
+    // 4. Optional signature rooftop accents for specialized colleges
+    if (heroSpec.rooftopAccent === 'observatory') {
+      // Crisp pixel-outlined astronomical observatory dome perched on Science Hall!
+      const ox = Math.round(cx + 2);
+      const oy = Math.round(dy + drawH * 0.25);
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(ox - 16, oy - 1, 32, 4);
+      ctx.beginPath();
+      ctx.arc(ox, oy, 15, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#f5f0e2';
+      ctx.beginPath();
+      ctx.arc(ox, oy, 13, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#c8c2b6';
+      ctx.beginPath();
+      ctx.arc(ox + 3, oy, 10, Math.PI * 1.5, 0);
+      ctx.fill();
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(ox - 2, oy - 13, 4, 12);
+      ctx.fillStyle = '#d4cbb8';
+      ctx.fillRect(ox - 14, oy, 28, 2);
+    } else if (heroSpec.rooftopAccent === 'antenna') {
+      const ax = Math.round(cx);
+      const ay = Math.round(dy + 6);
+      for (let sy = 0; sy < 30; sy += 6) {
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(ax - 2, ay - sy - 6, 5, 6);
+        ctx.fillStyle = (sy / 6) % 2 === 0 ? '#e83838' : '#fff5dc';
+        ctx.fillRect(ax - 1, ay - sy - 5, 3, 5);
+      }
+      ctx.fillStyle = '#ff384c';
+      ctx.fillRect(ax - 2, ay - 34, 5, 4);
+    } else if (heroSpec.rooftopAccent === 'flag') {
+      const fx = Math.round(cx + 2);
+      const fy = Math.round(dy + 12);
+      const wave = Math.round(Math.sin(elapsed * 5) * 1.5);
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(fx - 1, fy - 16, 2, 16);
+      ctx.fillStyle = '#6128a8';
+      ctx.fillRect(fx + 1, fy - 15 + wave, 9, 6);
+      ctx.fillStyle = '#f7c21b';
+      ctx.fillRect(fx + 1, fy - 12 + wave, 9, 2);
+    } else if (heroSpec.rooftopAccent === 'health_cross') {
+      const hx = Math.round(cx);
+      const hy = Math.round(dy + drawH * 0.24);
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(hx - 6, hy - 3, 12, 6);
+      ctx.fillRect(hx - 3, hy - 6, 6, 12);
+      ctx.fillStyle = '#fff5dc';
+      ctx.fillRect(hx - 5, hy - 2, 10, 4);
+      ctx.fillRect(hx - 2, hy - 5, 4, 10);
+      ctx.fillStyle = '#e03434';
+      ctx.fillRect(hx - 4, hy - 1, 8, 2);
+      ctx.fillRect(hx - 1, hy - 4, 2, 8);
+    } else if (heroSpec.rooftopAccent === 'neon') {
+      const nx = Math.round(cx - 12);
+      const ny = Math.round(dy + drawH * 0.56);
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(nx - 1, ny - 1, 20, 8);
+      ctx.fillStyle = '#ff42a1';
+      ctx.fillRect(nx, ny, 18, 6);
+      ctx.fillStyle = '#ffe878';
+      ctx.fillRect(nx + 2, ny + 2, 14, 2);
+    }
+
+    // 5. Warm golden pixel window glow accents at night!
+    if (nightLit) {
+      lightsOut.push({
+        x: cx,
+        y: dy + drawH * 0.58,
+        r: b.type === 'stadium' ? 120 : b.type === 'bell_tower' ? 68 : 54,
+        color: b.type === 'music_club' ? '255, 110, 200' : '255, 224, 130',
+        alpha: b.type === 'stadium' ? 0.26 : nightAmount * 0.34,
+      });
+    }
+  } else {
+    // Specialized procedural 16-bit sprites (Water Tower, Arena, Rec Center w/ Pool, Practice Field, Tiger Habitat, Utilities)
+    const sprite = getBuildingSprite(
+      b.type,
+      b.w,
+      b.h,
+      b.tier,
+      b.pilings,
+      nightLit,
+      underConstruction,
+      b.flooded,
+    );
+    const ix = Math.round(cx - sprite.anchorX);
+    const iy = Math.round(baseY - sprite.anchorY);
+    ctx.drawImage(sprite.canvas, ix, iy);
+  }
 
   // Animated pacing pixel Bengal Tiger ("Roux")!
   if (b.type === 'tiger_habitat' && !underConstruction) {
@@ -735,7 +867,32 @@ export function drawBuilding2D(
   }
 }
 
-// ===== 16-BIT PIXEL ART LOUISIANA TREES & FLORA =====
+// ===== 16-BIT PIXEL ART LOUISIANA TREES & FLORA (CONCEPT-ART GNARLED OAKS & CYPRESSES!) =====
+
+function drawLeafCluster(
+  pb: PixelBuffer,
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  hi: RGBA,
+  lit: RGBA,
+  mid: RGBA,
+  shade: RGBA,
+  dark: RGBA,
+  seed: number,
+): void {
+  // Draw chunky dark-outlined foliage puff so internal leaf tiers have crisp 16-bit pixel depth!
+  pb.fillEllipse(cx, cy + 1, rx + 1, ry + 1, PAL.outline);
+  pb.fillEllipse(cx, cy, rx, ry, (x, y, nx, ny) => {
+    const light = -nx * 0.55 - ny * 0.65;
+    const g = hash2(x + seed * 17, y + seed * 9);
+    if (light > 0.36 && g > 0.22) return hi;
+    if (light > 0.02) return g > 0.65 ? hi : lit;
+    if (light > -0.35) return bayer4(x, y) > 0.45 ? mid : shade;
+    return dark;
+  });
+}
 
 function getTreeSprite(
   kind: VegInstance['kind'],
@@ -748,97 +905,152 @@ function getTreeSprite(
 
   const isOak = kind === 'oak';
   const isCypress = kind === 'cypress';
-  const w = isOak ? 58 : isCypress ? 38 : 28;
-  const h = isOak ? 52 : isCypress ? 52 : 28;
+  const w = isOak ? 84 : isCypress ? 56 : 30;
+  const h = isOak ? 76 : isCypress ? 72 : 30;
   const cx = Math.floor(w * 0.5);
-  const baseY = h - 9;
+  const baseY = h - 11;
 
   const pb = new PixelBuffer(w, h);
 
-  // Dithered pixel ground shadow (SE)
-  const shRx = isOak ? 18 : isCypress ? 11 : 7;
-  const shRy = isOak ? 8 : isCypress ? 5 : 4;
-  pb.fillEllipse(cx + 5, baseY + 2, shRx, shRy, (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow);
+  // Wide grounded dark-emerald SE cast shadow (exact match to Option 1 concept art!)
+  const shRx = isOak ? 28 : isCypress ? 16 : 8;
+  const shRy = isOak ? 11 : isCypress ? 7 : 4;
+  pb.fillEllipse(cx + 6, baseY + 2, shRx, shRy, (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow);
 
   if (isOak) {
-    pb.rect(cx - 4, baseY - 14, 8, 14, PAL.woodShade);
-    pb.rect(cx - 3, baseY - 14, 3, 14, PAL.woodLit);
-    pb.rect(cx - 6, baseY - 2, 12, 3, PAL.woodDark);
-    pb.line(cx - 2, baseY - 11, cx - 12, baseY - 18, PAL.woodDark);
-    pb.line(cx + 2, baseY - 11, cx + 11, baseY - 18, PAL.woodDark);
-
-    const puffs: [number, number, number, number][] = [
-      [cx - 12, baseY - 20, 11, 8],
-      [cx + 12, baseY - 19, 11, 8],
-      [cx, baseY - 27, 15, 11],
-      [cx - 7, baseY - 25, 10, 8],
-      [cx + 8, baseY - 24, 10, 8],
-    ];
-    for (const [px0, py0, rx, ry] of puffs) {
-      pb.fillEllipse(px0, py0, rx, ry, (x, y, nx, ny) => {
-        const light = -nx * 0.55 - ny * 0.65;
-        const grain = hash2(x + variant * 13, y);
-        if (light > 0.35 && grain > 0.25) return PAL.grassHi;
-        if (light > -0.05) return grain > 0.6 ? PAL.grassHi : PAL.grassLit;
-        if (light > -0.45) return bayer4(x, y) > 0.5 ? PAL.grassMid : PAL.grassShade;
-        return PAL.grassDark;
-      });
-    }
-
-    const mossXs = [-14, -8, -1, 7, 13];
-    for (let m = 0; m < mossXs.length; m++) {
-      const mx = cx + mossXs[m];
-      const len = 7 + ((m * 3 + variant) % 5);
-      const topY = baseY - 15 - (m === 2 ? 2 : 0);
-      pb.line(mx, topY, mx, topY + len, PAL.mossHi);
-      pb.line(mx + 1, topY + 1, mx + 1, topY + len - 2, PAL.mossMid);
-    }
-  } else if (isCypress) {
+    // Massive gnarled spreading Live Oak trunk, thick splayed surface roots & dark boughs!
     pb.fillPoly(
       [
-        [cx - 5, baseY + 1],
-        [cx + 5, baseY + 1],
-        [cx + 2, baseY - 18],
-        [cx - 2, baseY - 18],
+        [cx - 12, baseY + 2],
+        [cx - 6, baseY - 4],
+        [cx - 6, baseY - 22],
+        [cx + 6, baseY - 22],
+        [cx + 7, baseY - 4],
+        [cx + 13, baseY + 2],
+        [cx + 4, baseY + 3],
+        [cx, baseY],
+        [cx - 5, baseY + 3],
       ],
-      (x, _y) => (x < cx ? PAL.woodLit : PAL.woodDark),
+      (x, y) => {
+        if (x < cx - 2) return ((x + y) & 1) === 0 ? PAL.woodLit : PAL.woodShade;
+        if (x < cx + 2) return PAL.woodShade;
+        return PAL.woodDark;
+      },
     );
-    pb.rect(cx - 8, baseY - 4, 2, 5, PAL.woodLit);
-    pb.rect(cx + 7, baseY - 3, 2, 4, PAL.woodShade);
+    // Thick gnarled lower spreading limbs visible under the canopy!
+    pb.line(cx - 3, baseY - 16, cx - 22, baseY - 29, PAL.woodDark);
+    pb.line(cx - 3, baseY - 17, cx - 22, baseY - 30, PAL.woodShade);
+    pb.line(cx - 3, baseY - 18, cx - 20, baseY - 31, PAL.woodLit);
 
-    const cHi = autumn ? hexToRGBA('#f29c38') : PAL.grassHi;
-    const cLit = autumn ? hexToRGBA('#d66828') : PAL.grassLit;
-    const cMid = autumn ? hexToRGBA('#a84222') : PAL.wetLit;
-    const cDark = autumn ? hexToRGBA('#6e261c') : PAL.wetShade;
+    pb.line(cx + 3, baseY - 16, cx + 22, baseY - 28, PAL.woodDark);
+    pb.line(cx + 3, baseY - 17, cx + 21, baseY - 29, PAL.woodShade);
+    pb.line(cx, baseY - 18, cx - 2, baseY - 35, PAL.woodDark);
 
-    const tiers: [number, number, number, number][] = [
-      [cx, baseY - 16, 13, 6],
-      [cx, baseY - 24, 11, 6],
-      [cx, baseY - 31, 8, 5],
-      [cx, baseY - 37, 5, 4],
+    // 11 individually dark-outlined dappled pixel foliage puffs for authentic SNES depth!
+    const clusters: [number, number, number, number][] = [
+      // Back dark crown layer
+      [cx - 21, baseY - 31, 13, 9],
+      [cx + 21, baseY - 30, 13, 9],
+      [cx, baseY - 45, 16, 11],
+      // Mid spreading boughs
+      [cx - 14, baseY - 38, 14, 10],
+      [cx + 14, baseY - 37, 14, 10],
+      [cx - 24, baseY - 26, 10, 7],
+      [cx + 24, baseY - 25, 10, 7],
+      // Front sunlit canopy puffs
+      [cx - 7, baseY - 42, 13, 9],
+      [cx + 8, baseY - 40, 12, 9],
+      [cx - 12, baseY - 30, 11, 7],
+      [cx + 11, baseY - 29, 11, 7],
+      [cx, baseY - 36, 13, 9],
     ];
-    for (const [px0, py0, rx, ry] of tiers) {
-      pb.fillEllipse(px0, py0, rx, ry, (x, y, nx, ny) => {
-        const l = -nx * 0.5 - ny * 0.6;
-        if (l > 0.35) return cHi;
-        if (l > -0.05) return bayer4(x, y) > 0.5 ? cLit : cMid;
-        return cDark;
-      });
+    for (let k = 0; k < clusters.length; k++) {
+      const [px0, py0, rx, ry] = clusters[k];
+      drawLeafCluster(pb, px0, py0, rx, ry, PAL.grassHi, PAL.grassLit, PAL.grassMid, PAL.grassShade, PAL.grassDark, variant * 11 + k);
     }
-    pb.line(cx - 7, baseY - 13, cx - 7, baseY - 7, PAL.mossHi);
-    pb.line(cx + 6, baseY - 14, cx + 6, baseY - 8, PAL.mossMid);
+
+    // Lush silver-sage curtains of hanging Spanish Moss with dark edges!
+    const mossDrape: [number, number, number][] = [
+      [-26, -21, 11],
+      [-20, -23, 14],
+      [-13, -24, 12],
+      [-7, -26, 10],
+      [7, -25, 13],
+      [14, -24, 14],
+      [21, -22, 12],
+      [26, -20, 9],
+    ];
+    for (let m = 0; m < mossDrape.length; m++) {
+      const [ox, oy, baseLen] = mossDrape[m];
+      const mx = cx + ox;
+      const topY = baseY + oy;
+      const len = baseLen + ((m * 3 + variant) % 4);
+      pb.line(mx - 1, topY, mx - 1, topY + len - 2, PAL.mossShade);
+      pb.line(mx, topY, mx, topY + len, PAL.mossHi);
+      pb.line(mx + 1, topY + 1, mx + 1, topY + len - 1, PAL.mossMid);
+    }
+  } else if (isCypress) {
+    // Dramatic widely-buttressed Bald Cypress trunk + 5 wooden swamp cypress knees!
+    pb.fillPoly(
+      [
+        [cx - 9, baseY + 2],
+        [cx - 5, baseY - 8],
+        [cx - 3, baseY - 36],
+        [cx + 3, baseY - 36],
+        [cx + 5, baseY - 8],
+        [cx + 9, baseY + 2],
+      ],
+      (x, y) => {
+        if (x < cx - 1) return ((x + y) & 1) === 0 ? PAL.woodHi : PAL.woodLit;
+        if (x < cx + 2) return PAL.woodShade;
+        return PAL.woodDark;
+      },
+    );
+    // 5 crisp wooden Cypress Knees poking up beside the flared roots!
+    for (const [kx, kh] of [[-14, 6], [-10, 8], [10, 7], [14, 5], [-6, 5]] as [number, number][]) {
+      pb.rect(cx + kx - 1, baseY - kh + 2, 3, kh, PAL.woodShade);
+      pb.line(cx + kx - 1, baseY - kh + 2, cx + kx - 1, baseY + 1, PAL.woodLit);
+    }
+
+    const cHi = autumn ? hexToRGBA('#f5a638') : PAL.grassHi;
+    const cLit = autumn ? hexToRGBA('#d96e28') : PAL.grassLit;
+    const cMid = autumn ? hexToRGBA('#ad4422') : PAL.wetLit;
+    const cShade = autumn ? hexToRGBA('#802d1d') : PAL.wetMid;
+    const cDark = autumn ? hexToRGBA('#571d1a') : PAL.grassDark;
+
+    // Layered flat feathery Bald Cypress bough tiers!
+    const tiers: [number, number, number, number][] = [
+      [cx - 10, baseY - 24, 11, 5],
+      [cx + 10, baseY - 23, 11, 5],
+      [cx, baseY - 26, 13, 6],
+      [cx - 8, baseY - 35, 10, 5],
+      [cx + 8, baseY - 34, 10, 5],
+      [cx, baseY - 38, 12, 6],
+      [cx - 5, baseY - 46, 8, 5],
+      [cx + 5, baseY - 45, 8, 5],
+      [cx, baseY - 52, 9, 5],
+    ];
+    for (let k = 0; k < tiers.length; k++) {
+      const [px0, py0, rx, ry] = tiers[k];
+      drawLeafCluster(pb, px0, py0, rx, ry, cHi, cLit, cMid, cShade, cDark, variant * 7 + k);
+    }
+    // Delicate hanging Spanish moss wisps
+    for (const [ox, oy, len] of [[-12, -20, 8], [11, -19, 9], [-9, -31, 7], [9, -30, 8]] as [number, number, number][]) {
+      pb.line(cx + ox, baseY + oy, cx + ox, baseY + oy + len, PAL.mossHi);
+      pb.line(cx + ox + 1, baseY + oy + 1, cx + ox + 1, baseY + oy + len - 2, PAL.mossMid);
+    }
   } else if (kind === 'azalea') {
-    pb.fillEllipse(cx, baseY - 5, 9, 6, (x, y, nx, ny) => {
+    pb.fillEllipse(cx, baseY - 5, 10, 7, (x, y, nx, ny) => {
       const h = hash2(x + variant * 17, y);
-      if (h > 0.72) return ny < 0 ? PAL.azaleaHi : PAL.azaleaMid;
-      if (h > 0.58) return PAL.azaleaShade;
+      if (h > 0.68) return ny < 0 ? PAL.azaleaHi : PAL.azaleaMid;
+      if (h > 0.54) return PAL.azaleaShade;
       return -nx - ny > 0 ? PAL.grassLit : PAL.grassDark;
     });
   } else {
-    const angles = [-2.4, -1.9, -1.5, -1.1, -0.7];
+    const angles = [-2.5, -2.0, -1.55, -1.1, -0.65];
     for (const a of angles) {
-      const ex = cx + Math.round(Math.cos(a) * 10);
-      const ey = baseY - 3 + Math.round(Math.sin(a) * 9);
+      const ex = cx + Math.round(Math.cos(a) * 11);
+      const ey = baseY - 3 + Math.round(Math.sin(a) * 10);
       pb.line(cx, baseY - 2, ex, ey, PAL.grassHi);
       pb.line(cx, baseY - 1, ex, ey + 1, PAL.grassShade);
     }
@@ -864,7 +1076,7 @@ export function drawTree2D(
   ctx.drawImage(sprite.canvas, Math.round(cx - sprite.anchorX + sway), Math.round(baseY - sprite.anchorY));
 }
 
-// ===== 16-BIT PIXEL ART LIVING ENTITIES =====
+// ===== 16-BIT PIXEL ART LIVING ENTITIES (CONCEPT-ART DETAILED STUDENTS!) =====
 
 export function drawPixelStudent(
   ctx: CanvasRenderingContext2D,
@@ -875,32 +1087,46 @@ export function drawPixelStudent(
   umbrella = false,
 ): void {
   const step = Math.floor(walkPhase) & 1;
-  const key = `stu|${shirt}|${step}|u${umbrella ? 1 : 0}`;
+  const key = `stu2|${shirt}|${step}|u${umbrella ? 1 : 0}`;
   let sp = entityCache.get(key);
   if (!sp) {
     const hexMap: Record<typeof shirt, string> = {
       purple: '#6e32c4',
       gold: '#f7c21b',
-      white: '#f2e8cf',
-      lavender: '#9b72cf',
+      white: '#e85a48',
+      lavender: '#369cd4',
+    };
+    const hairMap: Record<typeof shirt, string> = {
+      purple: '#3b241d',
+      gold: '#d49a42',
+      white: '#24181c',
+      lavender: '#6b3e26',
     };
     const shirtHex = hexMap[shirt];
-    const pb = new PixelBuffer(14, 18);
+    const pb = new PixelBuffer(16, 22);
     const col = hexToRGBA(shirtHex);
     const colDark = shadeRGBA(shirtHex, 0.72);
-    pb.fillEllipse(7, 15, 3, 1.5, PAL.shadowDeep);
-    pb.rect(5, 12 + (step ? 0 : 1), 2, 3, hexToRGBA('#3b4c73'));
-    pb.rect(7, 12 + (step ? 1 : 0), 2, 3, hexToRGBA('#273352'));
-    pb.rect(5, 8, 4, 4, col);
-    pb.rect(7, 8, 2, 4, colDark);
-    pb.rect(4, 8, 2, 3, PAL.goldLit);
-    pb.rect(5, 5, 4, 3, hexToRGBA('#f5c99b'));
-    pb.rect(5, 4, 4, 2, hexToRGBA('#472c24'));
+    // Crisp dark ground shadow
+    pb.fillEllipse(8, 19, 4, 2, PAL.shadowDeep);
+    // Walking legs + little sneakers!
+    pb.rect(6, 14 + (step ? 0 : 1), 2, 4, hexToRGBA('#364d7a'));
+    pb.rect(8, 14 + (step ? 1 : 0), 2, 4, hexToRGBA('#253559'));
+    pb.px(6, 18 + (step ? 0 : 1), PAL.stuccoHi);
+    pb.px(9, 18 + (step ? 1 : 0), PAL.stuccoHi);
+    // Torso shirt + arms
+    pb.rect(5, 9, 6, 5, col);
+    pb.rect(8, 9, 3, 5, colDark);
+    // Little varsity backpack!
+    pb.rect(4, 9, 2, 4, PAL.goldLit);
+    // Distinct head + face + hair!
+    pb.rect(6, 4, 4, 5, hexToRGBA('#f5c99b'));
+    pb.rect(5, 3, 6, 3, hexToRGBA(hairMap[shirt]));
+    pb.px(9, 6, PAL.outline); // eye
     if (umbrella) {
-      pb.fillEllipse(7, 4, 5, 3, PAL.purpleHi);
+      pb.fillEllipse(8, 4, 6, 3, PAL.purpleHi);
     }
     pb.applyOutline(PAL.outline);
-    sp = pb.toSprite(7, 15);
+    sp = pb.toSprite(8, 19);
     entityCache.set(key, sp);
   }
   ctx.drawImage(sp.canvas, Math.round(x - sp.anchorX), Math.round(y - sp.anchorY));

@@ -106,63 +106,63 @@ export const PAL = {
   winNight: hexToRGBA('#ffe57a'),
   winNightCore: hexToRGBA('#fffbe0'),
 
-  // Lush Louisiana Grass & Bayou Flora
-  grassHi: hexToRGBA('#7cd44c'),
-  grassLit: hexToRGBA('#5db53b'),
-  grassMid: hexToRGBA('#459432'),
-  grassShade: hexToRGBA('#31732c'),
-  grassDark: hexToRGBA('#215226'),
+  // Lush Vivid Concept-Art Louisiana Emerald Grass (SNES / Kairosoft vibrancy!)
+  grassHi: hexToRGBA('#6cd93c'),
+  grassLit: hexToRGBA('#52bf30'),
+  grassMid: hexToRGBA('#40a628'),
+  grassShade: hexToRGBA('#2f8522'),
+  grassDark: hexToRGBA('#1e5c1e'),
 
-  // Cypress / Wetland Moss
-  wetLit: hexToRGBA('#4b8c3b'),
-  wetMid: hexToRGBA('#386e34'),
-  wetShade: hexToRGBA('#274f2b'),
-  mudLit: hexToRGBA('#63543b'),
-  mudShade: hexToRGBA('#45372a'),
+  // Lush Bayou Wetlands & Cypress Banks (vivid moss-emerald, never muddy!)
+  wetLit: hexToRGBA('#3ea134'),
+  wetMid: hexToRGBA('#2f802d'),
+  wetShade: hexToRGBA('#215e27'),
+  mudLit: hexToRGBA('#546e38'),
+  mudShade: hexToRGBA('#364f2b'),
 
-  // Sparkling Teal Bayou & Deep River
-  waterSpark: hexToRGBA('#9bf5eb'),
-  waterHi: hexToRGBA('#43cfc7'),
-  waterMid: hexToRGBA('#24a6ad'),
-  waterDeep: hexToRGBA('#17788a'),
-  waterAbyss: hexToRGBA('#105166'),
+  // Sparkling Tropical Turquoise Bayou & Deep River (exact match to Option 1 concept art!)
+  waterSpark: hexToRGBA('#b8fff7'),
+  waterHi: hexToRGBA('#24d4c8'),
+  waterMid: hexToRGBA('#16b0b5'),
+  waterDeep: hexToRGBA('#0f8594'),
+  waterAbyss: hexToRGBA('#0a5c73'),
 
-  // Red Brick Quad Walkways & Masonry
-  brickHi: hexToRGBA('#de7e59'),
-  brickLit: hexToRGBA('#c25d40'),
-  brickMid: hexToRGBA('#9c4432'),
-  brickMortar: hexToRGBA('#6e2f2b'),
+  // Warm Rose-Terracotta Brick Quad Walkways & Masonry
+  brickHi: hexToRGBA('#e37c5d'),
+  brickLit: hexToRGBA('#cc6045'),
+  brickMid: hexToRGBA('#a84635'),
+  brickMortar: hexToRGBA('#732d27'),
 
   // Warm Cobble / Limestone Trim
-  stoneHi: hexToRGBA('#ece3cc'),
-  stoneMid: hexToRGBA('#c9bca2'),
-  stoneShade: hexToRGBA('#968878'),
+  stoneHi: hexToRGBA('#f5ebd2'),
+  stoneMid: hexToRGBA('#d6c6a5'),
+  stoneShade: hexToRGBA('#a3927c'),
 
-  // Wood / Pilings / Boardwalk
-  woodHi: hexToRGBA('#c48e54'),
-  woodLit: hexToRGBA('#9e6b3b'),
-  woodShade: hexToRGBA('#6e4628'),
-  woodDark: hexToRGBA('#472a1c'),
+  // Wood / Pilings / Arched Bayou Footbridge
+  woodHi: hexToRGBA('#d49859'),
+  woodLit: hexToRGBA('#ab713b'),
+  woodShade: hexToRGBA('#7a4b28'),
+  woodDark: hexToRGBA('#4a2a19'),
 
-  // Asphalt Roads
-  roadHi: hexToRGBA('#666a78'),
-  roadMid: hexToRGBA('#4d5161'),
-  roadShade: hexToRGBA('#383b4a'),
-  roadLine: hexToRGBA('#ffd84d'),
-  roadCross: hexToRGBA('#f0ecdc'),
+  // Clean Slate-Violet Campus Roads
+  roadHi: hexToRGBA('#767287'),
+  roadMid: hexToRGBA('#5e5a6e'),
+  roadShade: hexToRGBA('#454154'),
+  roadLine: hexToRGBA('#ffe052'),
+  roadCross: hexToRGBA('#f5eedc'),
 
   // Spanish Moss & Blossoms
-  mossHi: hexToRGBA('#a8ba8c'),
-  mossMid: hexToRGBA('#7d946c'),
-  mossShade: hexToRGBA('#576b4f'),
+  mossHi: hexToRGBA('#b5c49d'),
+  mossMid: hexToRGBA('#879c78'),
+  mossShade: hexToRGBA('#5c7056'),
   azaleaHi: hexToRGBA('#ff7eb6'),
   azaleaMid: hexToRGBA('#e04688'),
   azaleaShade: hexToRGBA('#a12562'),
 
   // Earth Cliffs
-  cliffLit: hexToRGBA('#876747'),
-  cliffMid: hexToRGBA('#694b36'),
-  cliffDark: hexToRGBA('#4a3329'),
+  cliffLit: hexToRGBA('#8a6440'),
+  cliffMid: hexToRGBA('#69472e'),
+  cliffDark: hexToRGBA('#452c22'),
 };
 
 export interface CachedSprite {
@@ -757,70 +757,69 @@ export function getTerrainAtlas(): TerrainAtlas {
     [0, 1, 2, 3].map((vIdx) =>
       makeDiamondTile((x, y) => {
         const h = hash2(x + vIdx * 71 + seedBase, y + vIdx * 37);
-        const h2 = hash2((x >> 1) + vIdx * 19 + seedBase, (y >> 1) + vIdx * 23);
-        // Subtle 16-bit pixel grass tufts & clover dots
+        // Clean sunlit SNES lawn with subtle organic grass-blade tufts!
         if (flowerChance > 0 && h > 1 - flowerChance) {
           return (x + y) % 2 === 0 ? PAL.goldHi : PAL.stuccoHi;
         }
-        if (h2 > 0.78) return bayer4(x, y) > 0.5 ? hi : lit;
-        if (h2 < 0.20) return bayer4(x, y) > 0.45 ? mid : shade;
-        return h > 0.68 ? hi : h < 0.25 ? shade : mid;
+        const tuft = hash2((x >> 2) + vIdx * 31 + seedBase, (y >> 2) + vIdx * 17);
+        if (tuft > 0.84 && (x & 1) === 0 && (y & 1) === 0) return hi;
+        if (tuft < 0.14 && ((x + y) & 3) === 0) return shade;
+        return bayer4(x, y) > 0.78 ? hi : lit;
       }),
     );
 
   const makeWaterFrames = (spark: RGBA, hi: RGBA, mid: RGBA, deep: RGBA): CachedSprite[] =>
     [0, 1, 2, 3].map((frame) =>
       makeDiamondTile((x, y) => {
-        const wave = Math.sin((x + frame * 4) * 0.22 + Math.sin((y + frame * 2) * 0.35) * 1.4);
-        const crest = ((x + frame * 3 + y * 2) % 13 === 0) && ((y + frame) % 5 === 0);
-        if (crest && wave > 0.35) return spark;
-        if (wave > 0.45) return bayer4(x, y) > 0.4 ? hi : mid;
-        if (wave < -0.45) return bayer4(x, y) > 0.5 ? deep : mid;
+        const wave = Math.sin((x + frame * 5) * 0.18 + Math.sin((y + frame * 2) * 0.30) * 1.2);
+        // Crisp horizontal pixel water sparkles like the concept art!
+        const sparkDash = ((y + frame * 2) % 6 === 0) && (((x + frame * 4 + y * 3) % 17) < 4);
+        if (sparkDash && wave > 0.15) return spark;
+        if (wave > 0.50) return hi;
+        if (wave < -0.52) return deep;
         return mid;
       }),
     );
 
   cachedAtlas = {
-    high: makeGrassVariants(PAL.grassHi, PAL.grassLit, PAL.grassMid, PAL.grassShade, 0.008, 10),
-    dry: makeGrassVariants(PAL.grassLit, PAL.grassMid, PAL.grassShade, PAL.grassDark, 0.003, 50),
-    wet: makeGrassVariants(PAL.wetLit, PAL.wetMid, PAL.wetShade, PAL.mudShade, 0, 90),
-    swamp: makeGrassVariants(PAL.wetMid, PAL.wetShade, PAL.mudLit, PAL.mudShade, 0, 130),
-    preserve: makeGrassVariants(PAL.grassLit, PAL.wetLit, PAL.wetMid, PAL.grassDark, 0.012, 170),
+    high: makeGrassVariants(PAL.grassHi, PAL.grassLit, PAL.grassMid, PAL.grassShade, 0.004, 10),
+    dry: makeGrassVariants(PAL.grassHi, PAL.grassLit, PAL.grassMid, PAL.grassShade, 0.002, 50),
+    wet: makeGrassVariants(PAL.grassLit, PAL.wetLit, PAL.wetMid, PAL.wetShade, 0, 90),
+    swamp: makeGrassVariants(PAL.wetLit, PAL.wetMid, PAL.wetShade, PAL.mudShade, 0, 130),
+    preserve: makeGrassVariants(PAL.grassHi, PAL.wetLit, PAL.wetMid, PAL.grassDark, 0.008, 170),
     pond: makeDiamondTile((x, y) => (bayer4(x, y) > 0.65 ? PAL.waterHi : PAL.waterMid)),
     canal: makeDiamondTile((x, y, u, v) => {
       if (u < 0.1 || u > 0.9 || v < 0.1 || v > 0.9) return PAL.stoneMid;
-      return bayer4(x, y) > 0.55 ? PAL.waterMid : PAL.waterDeep;
+      return bayer4(x, y) > 0.55 ? PAL.waterHi : PAL.waterMid;
     }),
     bayou: makeWaterFrames(PAL.waterSpark, PAL.waterHi, PAL.waterMid, PAL.waterDeep),
     river: makeWaterFrames(PAL.waterHi, PAL.waterMid, PAL.waterDeep, PAL.waterAbyss),
 
-    // Crisp running-bond red brick walkway tile!
-    brick: makeDiamondTile((x, y, u, v) => {
+    // Crisp running-bond warm rose-terracotta brick walkway with subtle cream mortar!
+    brick: makeDiamondTile((_x, _y, u, v) => {
       const bu = Math.floor(u * 8);
       const bv = Math.floor(v * 8);
       const fu = (u * 8) - bu;
       const fv = (v * 8) - bv;
       const offset = (bv & 1) * 0.5;
       const fuOff = ((u * 8 + offset) % 1 + 1) % 1;
-      if (fv < 0.16 || fuOff < 0.16) return PAL.brickMortar;
+      if (fv < 0.15 || fuOff < 0.15) return PAL.brickMortar;
       const h = hash2(bu + 11, bv + 29);
-      if (h > 0.72) return PAL.brickHi;
-      if (h < 0.28) return PAL.brickMid;
+      if (h > 0.70) return PAL.brickHi;
+      if (h < 0.25) return PAL.brickMid;
       return fu < 0.5 ? PAL.brickLit : PAL.brickMid;
     }),
 
-    // Lush manicured LSU Quad turf with subtle mowing stripes & stone kerb!
+    // Lush sunlit LSU Quad turf with crisp cream stone curb & subtle mowing stripes!
     quad: makeDiamondTile((x, y, u, v) => {
-      if (u < 0.08 || u > 0.92 || v < 0.08 || v > 0.92) {
-        return (x + y) % 3 === 0 ? PAL.stoneMid : PAL.stoneHi;
+      if (u < 0.07 || u > 0.93 || v < 0.07 || v > 0.93) {
+        return (x + y) % 4 === 0 ? PAL.stoneShade : PAL.stoneHi;
       }
-      const stripe = Math.floor((u + v) * 4) & 1;
-      const h = hash2(x, y);
-      if (h > 0.985) return PAL.goldHi; // tiny dandelion/clover accent
-      return stripe ? (bayer4(x, y) > 0.7 ? PAL.grassHi : PAL.grassLit) : PAL.grassMid;
+      const stripe = Math.floor((u + v) * 3) & 1;
+      return stripe ? PAL.grassHi : PAL.grassLit;
     }),
 
-    // Limestone Ceremonial Plaza tile
+    // Warm Limestone Ceremonial Plaza tile
     plaza: makeDiamondTile((_x, _y, u, v) => {
       const pu = (u * 4) % 1;
       const pv = (v * 4) % 1;
@@ -828,11 +827,11 @@ export function getTerrainAtlas(): TerrainAtlas {
       return ((Math.floor(u * 4) + Math.floor(v * 4)) & 1) ? PAL.stoneHi : PAL.stoneMid;
     }),
 
-    // Asphalt Road base tile
+    // Clean Slate-Violet Campus Road tile
     road: makeDiamondTile((x, y) => {
       const h = hash2(x, y);
-      if (h > 0.85) return PAL.roadHi;
-      if (h < 0.18) return PAL.roadShade;
+      if (h > 0.90) return PAL.roadHi;
+      if (h < 0.12) return PAL.roadShade;
       return PAL.roadMid;
     }),
   };
