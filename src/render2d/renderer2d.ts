@@ -2,7 +2,6 @@ import { CATALOG } from '../sim/catalog';
 import { idx, inBounds } from '../sim/terrain';
 import {
   BuildingId,
-  BuildingInstance,
   GameState,
   MAP_SIZE,
   OverlayMode,
@@ -10,19 +9,31 @@ import {
   TileFlag,
   TileType,
 } from '../sim/types';
-import { drawBuilding2D, drawTree2D, LightGlow } from './buildings2d';
+import {
+  drawBuilding2D,
+  drawPixelGator,
+  drawPixelPirogue,
+  drawPixelStudent,
+  drawPixelVehicle,
+  drawTree2D,
+  LightGlow,
+} from './buildings2d';
 import {
   Camera2D,
-  drawIsoDome,
-  drawIsoPrism,
   drawPoly,
   ELEV_PX,
   footprintCorners,
   HALF_H,
   HALF_W,
-  shadeColor,
   tileToIso,
 } from './iso';
+import {
+  CachedSprite,
+  drawPxPrism,
+  getTerrainAtlas,
+  PAL,
+  PixelBuffer,
+} from './pixel';
 
 interface Particle2D {
   x: number;
@@ -35,23 +46,60 @@ interface Particle2D {
   size: number;
 }
 
-interface DrawItem {
-  depth: number;
-  draw: () => void;
+const structCache = new Map<string, CachedSprite>();
+
+function getStructureSprite(kind: 'levee' | 'floodwall' | 'floodgate_open' | 'floodgate_closed' | 'fence'): CachedSprite {
+  const hit = structCache.get(kind);
+  if (hit) return hit;
+
+  const pb = new PixelBuffer(72, 64);
+  const cx = 36;
+  const by = 44;
+
+  if (kind === 'levee') {
+    drawPxPrism(pb, cx, by, 1.0, 1.0, 12, '#629c3a', '#75bf45', { inset: 0.02, cornice: false, castShadow: true });
+    pb.line(cx - 30, by + 1, cx, by + 15, PAL.cliffMid);
+    pb.line(cx, by + 15, cx + 30, by + 1, PAL.cliffDark);
+  } else if (kind === 'floodwall') {
+    drawPxPrism(pb, cx, by, 0.94, 0.94, 21, '#b8bec7', '#d8dee6', { inset: 0.08, cornice: true, castShadow: true });
+    pb.line(cx - 10, by - 12, cx - 10, by + 6, PAL.roadShade);
+    pb.line(cx + 10, by - 12, cx + 10, by + 6, PAL.roadShade);
+  } else if (kind === 'floodgate_open' || kind === 'floodgate_closed') {
+    drawPxPrism(pb, cx - 14, by - 3, 0.34, 0.34, 24, '#b8bec7', '#d8dee6', { inset: 0.02 });
+    drawPxPrism(pb, cx + 14, by + 3, 0.34, 0.34, 24, '#b8bec7', '#d8dee6', { inset: 0.02 });
+    if (kind === 'floodgate_closed') {
+      drawPxPrism(pb, cx, by, 0.88, 0.34, 21, '#d95432', '#f2784b', { inset: 0.04, cornice: false });
+      pb.line(cx - 12, by - 12, cx + 12, by - 4, PAL.goldHi);
+    }
+  } else if (kind === 'fence') {
+    for (const [ox, oy] of [[-12, -2], [0, 4], [12, -2]] as [number, number][]) {
+      pb.rect(cx + ox - 1, by + oy - 11, 2, 11, PAL.roadShade);
+    }
+    pb.line(cx - 12, by - 9, cx, by - 3, PAL.stoneHi);
+    pb.line(cx, by - 3, cx + 12, by - 9, PAL.stoneMid);
+    pb.line(cx - 12, by - 5, cx, by + 1, PAL.stoneHi);
+    pb.line(cx, by + 1, cx + 12, by - 5, PAL.stoneMid);
+  }
+
+  pb.applyOutline(PAL.outline);
+  const sp = pb.toSprite(cx, by);
+  structCache.set(kind, sp);
+  return sp;
 }
 
 export class Renderer2D {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-  camera: Camera2D;
-  nightAmount = 0;
-
-  private container: HTMLElement;
-  private particles: Particle2D[] = [];
-  private lastBurstTick = -100;
-  private confettiAccum = 0;
+  readonly canvas: HTMLCanvasElement;
+  readonly ctx: CanvasRenderingContext2D;
+  private readonly pxCanvas: HTMLCanvasElement;
+  private readonly pxCtx: CanvasRenderingContext2D;
+  readonly camera: Camera2D;
+  private readonly container: HTMLElement;
   private viewW = 1280;
-  private viewH = 800;
+  private viewH = 720;
+  private pxScale = 1.5; // Authentic crisp 16-bit virtual pixel density!
+  private particles: Particle2D[] = [];
+  private lastFireworkTick = -1;
+  private confettiTimer = 0;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -59,10 +107,16 @@ export class Renderer2D {
     this.canvas.style.width = '100%';
     this.canvas.style.height = '100%';
     this.canvas.style.display = 'block';
+    this.canvas.style.imageRendering = 'pixelated';
     container.appendChild(this.canvas);
     this.ctx = this.canvas.getContext('2d')!;
-    this.camera = new Camera2D();
+    this.ctx.imageSmoothingEnabled = false;
 
+    this.pxCanvas = document.createElement('canvas');
+    this.pxCtx = this.pxCanvas.getContext('2d')!;
+    this.pxCtx.imageSmoothingEnabled = false;
+
+    this.camera = new Camera2D();
     this.onResize();
     window.addEventListener('resize', this.onResize);
   }
@@ -73,6 +127,10 @@ export class Renderer2D {
     this.viewH = Math.max(1, this.container.clientHeight || window.innerHeight);
     this.canvas.width = Math.round(this.viewW * dpr);
     this.canvas.height = Math.round(this.viewH * dpr);
+    this.pxCanvas.width = Math.max(320, Math.round(this.viewW / this.pxScale));
+    this.pxCanvas.height = Math.max(200, Math.round(this.viewH / this.pxScale));
+    this.ctx.imageSmoothingEnabled = false;
+    this.pxCtx.imageSmoothingEnabled = false;
   };
 
   getSize(): { w: number; h: number } {
@@ -103,17 +161,16 @@ export class Renderer2D {
     } else {
       night = 1;
     }
-    this.nightAmount = night;
     return { night, golden, storm };
   }
 
   private spawnFireworks(wx: number, wy: number): void {
-    const cols = ['#ffd228', '#a35cff', '#ffffff', '#f5b700'];
+    const cols = ['#ffe45e', '#a35cff', '#fff5dc', '#f5b700'];
     for (let burst = 0; burst < 3; burst++) {
       const bx = wx + (Math.random() - 0.5) * 90;
       const by = wy - 55 - Math.random() * 45;
       const col = cols[burst % cols.length];
-      for (let i = 0; i < 28; i++) {
+      for (let i = 0; i < 26; i++) {
         const ang = Math.random() * Math.PI * 2;
         const spd = 25 + Math.random() * 75;
         this.particles.push({
@@ -124,14 +181,14 @@ export class Renderer2D {
           life: 1.2 + Math.random() * 0.6,
           maxLife: 1.8,
           color: col,
-          size: 3.2,
+          size: 3,
         });
       }
     }
   }
 
   private spawnConfetti(wx: number, wy: number): void {
-    const cols = ['#9c42f5', '#ffd228', '#22cc66'];
+    const cols = ['#8746d4', '#ffd84d', '#34c966'];
     for (let i = 0; i < 6; i++) {
       this.particles.push({
         x: wx + (Math.random() - 0.5) * 14,
@@ -141,7 +198,7 @@ export class Renderer2D {
         life: 1.1 + Math.random() * 0.5,
         maxLife: 1.6,
         color: cols[i % 3],
-        size: 2.6,
+        size: 3,
       });
     }
   }
@@ -162,72 +219,68 @@ export class Renderer2D {
     },
     cursorTile: { tx: number; ty: number } | null,
   ): void {
-    const ctx = this.ctx;
-    const dpr = this.canvas.width / Math.max(1, this.viewW);
+    const pw = this.pxCanvas.width;
+    const ph = this.pxCanvas.height;
+    const ctx = this.pxCtx;
+    ctx.imageSmoothingEnabled = false;
+
     const { night, golden, storm } = this.computeNightAmount(state);
     const lightning = state.storm.active ? state.storm.lightningFlash : 0;
 
     ctx.save();
-    ctx.scale(dpr, dpr);
 
-    // 1. Atmospheric Sky/Bayou Backdrop Gradient
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, this.viewH);
-    if (storm > 0.45) {
-      bgGrad.addColorStop(0, '#2a3745');
-      bgGrad.addColorStop(1, '#3b4e5c');
-    } else if (night > 0.5) {
-      bgGrad.addColorStop(0, this.camera.brightNight ? '#1b2448' : '#111630');
-      bgGrad.addColorStop(1, this.camera.brightNight ? '#28365c' : '#1c2444');
-    } else if (golden > 0.25) {
-      bgGrad.addColorStop(0, '#5a6fa8');
-      bgGrad.addColorStop(1, '#e0a572');
-    } else {
-      bgGrad.addColorStop(0, '#5a99c8');
-      bgGrad.addColorStop(1, '#8cc0d8');
-    }
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, this.viewW, this.viewH);
+    // 1. Crisp 16-bit Banded Horizon Sky Backdrop
+    const skyTop = storm > 0.3
+      ? '#26344a'
+      : night > 0.5
+        ? '#1a2442'
+        : golden > 0.35
+          ? '#6e528a'
+          : '#3d7cc9';
+    const skyMid = storm > 0.3
+      ? '#3a4b63'
+      : night > 0.5
+        ? '#26345c'
+        : golden > 0.35
+          ? '#d67e56'
+          : '#68b0e3';
+    const skyBot = storm > 0.3
+      ? '#4e6078'
+      : night > 0.5
+        ? '#314575'
+        : golden > 0.35
+          ? '#f5c278'
+          : '#9be0f2';
+    ctx.fillStyle = skyTop;
+    ctx.fillRect(0, 0, pw, Math.ceil(ph * 0.34));
+    ctx.fillStyle = skyMid;
+    ctx.fillRect(0, Math.floor(ph * 0.34), pw, Math.ceil(ph * 0.34));
+    ctx.fillStyle = skyBot;
+    ctx.fillRect(0, Math.floor(ph * 0.68), pw, ph);
 
-    // Camera transform + shake
-    const sxShake = this.camera.shakeAmount > 0 ? (Math.random() - 0.5) * this.camera.shakeAmount : 0;
-    const syShake = this.camera.shakeAmount > 0 ? (Math.random() - 0.5) * this.camera.shakeAmount : 0;
+    const shakeX = this.camera.shakeAmount > 0 ? Math.round((Math.random() - 0.5) * this.camera.shakeAmount) : 0;
+    const shakeY = this.camera.shakeAmount > 0 ? Math.round((Math.random() - 0.5) * this.camera.shakeAmount) : 0;
+    const z = this.camera.zoom / this.pxScale;
 
     ctx.save();
-    ctx.translate(this.viewW * 0.5 + sxShake, this.viewH * 0.5 + syShake);
-    ctx.scale(this.camera.zoom, this.camera.zoom);
-    ctx.translate(-this.camera.x, -this.camera.y);
+    ctx.translate(Math.round(pw * 0.5 + shakeX), Math.round(ph * 0.5 + shakeY));
+    ctx.scale(z, z);
+    ctx.translate(Math.round(-this.camera.x), Math.round(-this.camera.y));
 
-    // Compute visible world bounds for crisp viewport culling
-    const pad = 180 / this.camera.zoom;
-    const minWX = this.camera.x - (this.viewW * 0.5) / this.camera.zoom - pad;
-    const maxWX = this.camera.x + (this.viewW * 0.5) / this.camera.zoom + pad;
-    const minWY = this.camera.y - (this.viewH * 0.5) / this.camera.zoom - pad;
-    const maxWY = this.camera.y + (this.viewH * 0.5) / this.camera.zoom + pad;
+    const padW = (pw * 0.5) / z + 150;
+    const padH = (ph * 0.5) / z + 170;
+    const minWX = this.camera.x - padW;
+    const maxWX = this.camera.x + padW;
+    const minWY = this.camera.y - padH;
+    const maxWY = this.camera.y + padH;
 
-    const { tiles } = state;
-    const rawSurge = state.storm.active ? state.storm.currentSurgeFt : 0;
-    const hasBarrier = state.buildings.some(
-      (b) => b && b.type === 'surge_barrier' && b.built >= 1 && b.powered && !b.blackout,
-    );
-    const surge = hasBarrier && rawSurge > 1.5 ? rawSurge * 0.45 : rawSurge;
-    const waterStage = Math.max(state.riverStage, state.bayouStage) + surge;
-
+    const tiles = state.tiles;
+    const waterStage = Math.max(0.25, state.bayouStage);
+    const atlas = getTerrainAtlas();
+    const waterFrame = Math.floor(elapsed * 3.2) & 3;
     const lights: LightGlow[] = [];
 
-    const surfAt = (x: number, y: number): SurfaceType =>
-      inBounds(x, y) ? (tiles.surface[idx(x, y)] as SurfaceType) : SurfaceType.None;
-    const isRoadLike = (x: number, y: number): boolean => {
-      const sf = surfAt(x, y);
-      return sf === SurfaceType.Road || sf === SurfaceType.Bridge;
-    };
-    const isWalkConnect = (x: number, y: number): boolean => {
-      if (!inBounds(x, y)) return false;
-      const sf = surfAt(x, y);
-      if (sf !== SurfaceType.None && sf !== SurfaceType.GatorFence) return true;
-      return tiles.owner[idx(x, y)] >= 0;
-    };
-
-    // ===== PASS 1: TERRAIN DIAMONDS, CLIFF SKIRTS, ANIMATED WATER, SURFACES & OVERLAYS =====
+    // ===== PASS 1: CACHED 16-BIT TERRAIN TILES, CLIFF SKIRTS, SURFACES & OVERLAYS =====
     for (let sum = 0; sum <= (MAP_SIZE - 1) * 2; sum++) {
       const txMin = Math.max(0, sum - (MAP_SIZE - 1));
       const txMax = Math.min(MAP_SIZE - 1, sum);
@@ -243,80 +296,78 @@ export class Renderer2D {
         const p = tileToIso(tx + 0.5, ty + 0.5, elev);
         if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
 
-        const cN: [number, number] = [p.x, p.y - HALF_H];
-        const cE: [number, number] = [p.x + HALF_W, p.y];
-        const cS: [number, number] = [p.x, p.y + HALF_H];
-        const cW: [number, number] = [p.x - HALF_W, p.y];
+        const ix = Math.round(p.x);
+        const iy = Math.round(p.y);
+        const cN: [number, number] = [ix, iy - HALF_H];
+        const cE: [number, number] = [ix + HALF_W, iy];
+        const cS: [number, number] = [ix, iy + HALF_H];
+        const cW: [number, number] = [ix - HALF_W, iy];
 
-        // Determine rich natural Louisiana tile color
-        let fill: string;
-        if (isWater) {
-          const shimmer = 0.5 + 0.5 * Math.sin(elapsed * 2.2 + tx * 0.7 - ty * 0.45);
-          fill = f & TileFlag.Bayou
-            ? shimmer > 0.65 ? '#357978' : '#2a6568'
-            : shimmer > 0.68 ? '#235966' : '#1b4754';
-        } else if (isCanal) {
-          fill = '#2d6870';
-        } else {
-          const t = tiles.type[i];
-          const toneShift = ((tx * 37 + ty * 17) % 5) * 0.015 - 0.03;
-          if (t === TileType.High) fill = shadeColor('#80a64b', 1 + toneShift);
-          else if (t === TileType.Dry) fill = shadeColor('#6f9440', 1 + toneShift);
-          else if (t === TileType.Wet) fill = shadeColor('#5c783b', 1 + toneShift);
-          else if (t === TileType.Pond) fill = '#2e7e8c';
-          else fill = f & TileFlag.Preserve ? '#3f7644' : '#4a5c36';
-        }
-
-        // Draw subtle earthen cliff skirts when higher than SE/SW neighbors
+        // Pixel earthen cliff skirts when higher than SE/SW neighbors!
         if (!isWater) {
           const eS = inBounds(tx, ty + 1) ? tiles.elev[idx(tx, ty + 1)] : 0;
           const eE = inBounds(tx + 1, ty) ? tiles.elev[idx(tx + 1, ty)] : 0;
           const dropW = Math.max(0, elev - Math.max(0, eS)) * ELEV_PX;
           const dropE = Math.max(0, elev - Math.max(0, eE)) * ELEV_PX;
           if (dropW > 1.2) {
-            drawPoly(
-              ctx,
-              [cW, cS, [cS[0], cS[1] + dropW + 2], [cW[0], cW[1] + dropW + 2]],
-              '#6b573e',
-            );
+            drawPoly(ctx, [cW, cS, [cS[0], Math.round(cS[1] + dropW + 2)], [cW[0], Math.round(cW[1] + dropW + 2)]], '#7d5c3e', '#23152b', 1);
           }
           if (dropE > 1.2) {
-            drawPoly(
-              ctx,
-              [cS, cE, [cE[0], cE[1] + dropE + 2], [cS[0], cS[1] + dropE + 2]],
-              '#4d3d2f',
-            );
+            drawPoly(ctx, [cS, cE, [cE[0], Math.round(cE[1] + dropE + 2)], [cS[0], Math.round(cS[1] + dropE + 2)]], '#573d2c', '#23152b', 1);
           }
         }
 
-        // Paint tile diamond with seam-free overlap stroke across all zoom levels
-        drawPoly(ctx, [cN, cE, cS, cW], fill, fill, 1.85);
+        const variant = (tx * 5 + ty * 13) & 3;
+        let tileSprite: CachedSprite;
+        if (isWater) {
+          tileSprite = f & TileFlag.Bayou ? atlas.bayou[waterFrame] : atlas.river[waterFrame];
+        } else if (isCanal) {
+          tileSprite = atlas.canal;
+        } else {
+          const t = tiles.type[i];
+          if (t === TileType.High) tileSprite = atlas.high[variant];
+          else if (t === TileType.Dry || t === TileType.Drained) tileSprite = atlas.dry[variant];
+          else if (t === TileType.Wet) tileSprite = atlas.wet[variant];
+          else if (t === TileType.Pond) tileSprite = atlas.pond;
+          else tileSprite = f & TileFlag.Preserve ? atlas.preserve[variant] : atlas.swamp[variant];
+        }
 
-        // Animated water ripple glints on Bayous & Rivers
-        if (isWater && (tx + ty) % 2 === 0) {
-          const rx = p.x + Math.sin(elapsed * 1.8 + tx * 1.1) * 7;
-          ctx.strokeStyle = night > 0.4 ? 'rgba(180,205,255,0.28)' : 'rgba(225,250,255,0.34)';
-          ctx.lineWidth = 1.2;
-          ctx.beginPath();
-          ctx.moveTo(rx - 6, p.y);
-          ctx.lineTo(rx + 6, p.y);
-          ctx.stroke();
+        ctx.drawImage(tileSprite.canvas, ix - 32, iy - 16);
+
+        // Sparkling pixel shoreline foam where water meets land!
+        if (isWater) {
+          const landN = inBounds(tx, ty - 1) && (tiles.flags[idx(tx, ty - 1)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
+          const landW = inBounds(tx - 1, ty) && (tiles.flags[idx(tx - 1, ty)] & (TileFlag.OpenWater | TileFlag.Bayou)) === 0;
+          if (landN || landW) {
+            ctx.strokeStyle = 'rgba(180, 248, 240, 0.72)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (landN) {
+              ctx.moveTo(cN[0], cN[1] + 1);
+              ctx.lineTo(cE[0] - 2, cE[1] + 1);
+            }
+            if (landW) {
+              ctx.moveTo(cN[0], cN[1] + 1);
+              ctx.lineTo(cW[0] + 2, cW[1] + 1);
+            }
+            ctx.stroke();
+          }
         }
 
         // Translucent rising Overland Floodwater!
         const depth = tiles.depth[i];
         if (!isWater && !isCanal && depth >= 0.14) {
-          const alpha = Math.min(0.76, 0.25 + depth * 0.25);
-          drawPoly(ctx, [cN, cE, cS, cW], `rgba(48, 128, 148, ${alpha})`);
+          const alpha = Math.min(0.78, 0.30 + depth * 0.26);
+          drawPoly(ctx, [cN, cE, cS, cW], `rgba(36, 152, 168, ${alpha})`);
         }
 
-        // Unowned State Land subtle misty veil & dashed border
+        // Unowned State Land misty indigo parcel veil + dashed gold boundary
         const pIdx = Math.floor(ty / 16) * 4 + Math.floor(tx / 16);
         if (state.ownedParcels && !state.ownedParcels[pIdx] && !isWater) {
-          drawPoly(ctx, [cN, cE, cS, cW], 'rgba(42, 54, 82, 0.20)');
+          drawPoly(ctx, [cN, cE, cS, cW], 'rgba(28, 34, 62, 0.24)');
           if (tx % 16 === 0 || ty % 16 === 0) {
-            ctx.strokeStyle = 'rgba(232, 222, 255, 0.52)';
-            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = 'rgba(255, 224, 138, 0.55)';
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
             if (tx % 16 === 0) {
               ctx.moveTo(cN[0], cN[1]);
@@ -334,193 +385,69 @@ export class Renderer2D {
         if (state.overlay !== OverlayMode.None && !isWater) {
           let ovColor: string | null = null;
           if (state.overlay === OverlayMode.FloodRisk) {
-            if (f & TileFlag.Protected) ovColor = 'rgba(32, 214, 154, 0.50)';
-            else if (tiles.risk[i] > 0.1) {
-              const sev = Math.min(1, tiles.risk[i] / 4.2);
-              ovColor = sev > 0.55 ? 'rgba(230, 57, 70, 0.56)' : 'rgba(245, 166, 35, 0.52)';
-            }
+            const isProt = (f & TileFlag.Protected) !== 0;
+            if (isProt) ovColor = 'rgba(46, 212, 118, 0.52)';
+            else if (tiles.elev[i] < 3.0) ovColor = 'rgba(242, 62, 62, 0.62)';
+            else if (tiles.elev[i] < 5.0) ovColor = 'rgba(248, 158, 42, 0.54)';
+            else ovColor = 'rgba(245, 224, 92, 0.28)';
           } else if (state.overlay === OverlayMode.Elevation) {
-            const t = Math.max(0, Math.min(1, elev / 8.5));
-            ovColor = `hsla(${Math.round(28 + t * 110)}, 75%, 48%, 0.48)`;
-          } else if (state.overlay === OverlayMode.Ecology) {
-            ovColor = f & TileFlag.Preserve
-              ? 'rgba(32, 224, 112, 0.45)'
-              : tiles.type[i] === TileType.Marsh
-                ? 'rgba(59, 168, 107, 0.35)'
-                : null;
-          } else if (state.overlay === OverlayMode.Mosquito) {
-            const mq = tiles.mosq[i];
-            ovColor = mq > 0.14
-              ? `rgba(217, 38, 98, ${Math.min(0.65, mq * 0.8)})`
-              : 'rgba(40, 184, 120, 0.22)';
+            const e = tiles.elev[i];
+            if (e > 6.5) ovColor = 'rgba(54, 184, 72, 0.54)';
+            else if (e > 4.0) ovColor = 'rgba(218, 206, 62, 0.48)';
+            else if (e > 2.0) ovColor = 'rgba(240, 134, 48, 0.50)';
+            else ovColor = 'rgba(224, 52, 64, 0.54)';
           } else if (state.overlay === OverlayMode.Utilities) {
-            for (const b of state.buildings) {
-              if (!b || b.built < 1 || b.flooded) continue;
-              if (b.type === 'substation' || b.type === 'generator') {
-                const r = b.type === 'substation' ? 18 : 7;
-                if (Math.max(Math.abs(tx - (b.tx + 1)), Math.abs(ty - (b.ty + 1))) <= r) {
-                  ovColor = 'rgba(245, 200, 66, 0.40)';
-                  break;
-                }
-              }
-            }
+            const bid = tiles.owner[i];
+            const b = bid > 0 ? state.buildings[bid] : null;
+            if (b) ovColor = b.powered ? 'rgba(66, 228, 128, 0.62)' : 'rgba(242, 54, 54, 0.72)';
+          } else if (state.overlay === OverlayMode.Ecology) {
+            if (f & TileFlag.Preserve) ovColor = 'rgba(48, 226, 124, 0.58)';
+            else if (tiles.type[i] === TileType.Wet || tiles.type[i] === TileType.Marsh) ovColor = 'rgba(38, 178, 146, 0.42)';
+          } else if (state.overlay === OverlayMode.Mosquito) {
+            const m = tiles.mosq[i];
+            if (m > 0.55) ovColor = 'rgba(214, 56, 224, 0.62)';
+            else if (m > 0.25) ovColor = 'rgba(245, 168, 42, 0.46)';
           }
           if (ovColor) drawPoly(ctx, [cN, cE, cS, cW], ovColor);
         }
 
-        // ===== SURFACE LAYER (Connected Paths, Smart Roads + Crosswalks, Bridges/Boardwalks, Quads!) =====
-        const surf = tiles.surface[i] as SurfaceType;
-        if (surf === SurfaceType.Quad || surf === SurfaceType.ParadeGround) {
-          const qCol = surf === SurfaceType.ParadeGround ? '#64a348' : '#58983e';
-          drawPoly(ctx, [cN, cE, cS, cW], qCol, qCol, 0.8);
-          // Limestone perimeter kerbs around outer quad edges
-          ctx.strokeStyle = '#dfd3b8';
-          ctx.lineWidth = 2.4;
-          const same = (nx: number, ny: number) => inBounds(nx, ny) && tiles.surface[idx(nx, ny)] === surf;
-          if (!same(tx, ty - 1)) { ctx.beginPath(); ctx.moveTo(cN[0], cN[1]); ctx.lineTo(cE[0], cE[1]); ctx.stroke(); }
-          if (!same(tx, ty + 1)) { ctx.beginPath(); ctx.moveTo(cW[0], cW[1]); ctx.lineTo(cS[0], cS[1]); ctx.stroke(); }
-          if (!same(tx - 1, ty)) { ctx.beginPath(); ctx.moveTo(cN[0], cN[1]); ctx.lineTo(cW[0], cW[1]); ctx.stroke(); }
-          if (!same(tx + 1, ty)) { ctx.beginPath(); ctx.moveTo(cE[0], cE[1]); ctx.lineTo(cS[0], cS[1]); ctx.stroke(); }
-        } else if (surf === SurfaceType.Path) {
-          // Continuous warm brick walkway with connecting arms!
-          const core = footprintCorners(p.x, p.y, 0.56, 0.56, 0);
-          drawPoly(ctx, [core.n, core.e, core.s, core.w], '#dec6a0', '#c4aa82', 0.8);
-          ctx.strokeStyle = '#dec6a0';
-          ctx.lineWidth = 10;
-          ctx.lineCap = 'round';
-          if (isWalkConnect(tx, ty - 1)) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo((cN[0] + cE[0]) * 0.5, (cN[1] + cE[1]) * 0.5); ctx.stroke(); }
-          if (isWalkConnect(tx, ty + 1)) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo((cW[0] + cS[0]) * 0.5, (cW[1] + cS[1]) * 0.5); ctx.stroke(); }
-          if (isWalkConnect(tx - 1, ty)) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo((cN[0] + cW[0]) * 0.5, (cN[1] + cW[1]) * 0.5); ctx.stroke(); }
-          if (isWalkConnect(tx + 1, ty)) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo((cE[0] + cS[0]) * 0.5, (cE[1] + cS[1]) * 0.5); ctx.stroke(); }
-          ctx.lineCap = 'butt';
-
-          if ((tx + ty) % 5 === 0 && night > 0.18) {
-            lights.push({ x: p.x + 8, y: p.y - 10, r: 28, color: '255, 220, 130', alpha: night * 0.35 });
-          }
-        } else if (surf === SurfaceType.Road) {
-          drawPoly(ctx, [cN, cE, cS, cW], '#3d424b', '#3d424b', 1.1);
-          const nR = isRoadLike(tx, ty - 1);
-          const sR = isRoadLike(tx, ty + 1);
-          const wR = isRoadLike(tx - 1, ty);
-          const eR = isRoadLike(tx + 1, ty);
-          const hasNS = nR || sR;
-          const hasEW = wR || eR;
-
-          // Dashed gold centerline on straight stretches
-          ctx.strokeStyle = '#f0c748';
-          ctx.lineWidth = 1.8;
-          if (hasNS && !hasEW) {
-            ctx.beginPath();
-            ctx.moveTo(p.x + 8, p.y - 4);
-            ctx.lineTo(p.x - 8, p.y + 4);
-            ctx.stroke();
-          } else if (hasEW && !hasNS) {
-            ctx.beginPath();
-            ctx.moveTo(p.x - 8, p.y - 4);
-            ctx.lineTo(p.x + 8, p.y + 4);
-            ctx.stroke();
-          }
-
-          // White pedestrian crosswalk bars where paths intercept roads!
-          const isPed = (x: number, y: number) => {
-            const sf = surfAt(x, y);
-            return sf === SurfaceType.Path || sf === SurfaceType.Boardwalk || sf === SurfaceType.Quad;
-          };
-          if ((isPed(tx - 1, ty) || isPed(tx + 1, ty)) && hasNS) {
-            ctx.strokeStyle = 'rgba(244,240,230,0.85)';
-            ctx.lineWidth = 2.2;
-            for (const o of [-5, 0, 5]) {
-              ctx.beginPath();
-              ctx.moveTo(p.x - 7 + o, p.y - 3 + o * 0.5);
-              ctx.lineTo(p.x + 7 + o, p.y + 3 + o * 0.5);
-              ctx.stroke();
-            }
-          } else if ((isPed(tx, ty - 1) || isPed(tx, ty + 1)) && hasEW) {
-            ctx.strokeStyle = 'rgba(244,240,230,0.85)';
-            ctx.lineWidth = 2.2;
-            for (const o of [-5, 0, 5]) {
-              ctx.beginPath();
-              ctx.moveTo(p.x + 7 - o, p.y - 3 + o * 0.5);
-              ctx.lineTo(p.x - 7 - o, p.y + 3 + o * 0.5);
-              ctx.stroke();
-            }
-          }
-
-          if ((tx + ty) % 4 === 0 && night > 0.18) {
-            lights.push({ x: p.x - 10, y: p.y - 12, r: 34, color: '255, 218, 130', alpha: night * 0.38 });
-          }
-        } else if (surf === SurfaceType.Boardwalk) {
-          const deckP = tileToIso(tx + 0.5, ty + 0.5, Math.max(elev + 0.9, 2.2));
-          // Timber pilings
-          ctx.strokeStyle = '#634529';
-          ctx.lineWidth = 2.5;
-          ctx.beginPath();
-          ctx.moveTo(deckP.x - 12, deckP.y);
-          ctx.lineTo(deckP.x - 12, p.y + 4);
-          ctx.moveTo(deckP.x + 12, deckP.y);
-          ctx.lineTo(deckP.x + 12, p.y + 4);
-          ctx.stroke();
-          drawIsoPrism(ctx, deckP.x, deckP.y + 2, 0.86, 0.86, 3, '#8c643f', '#a67a52', { inset: 0.02 });
-        } else if (surf === SurfaceType.Bridge) {
-          const deckP = tileToIso(tx + 0.5, ty + 0.5, Math.max(elev + 1.1, 3.6));
-          // Concrete piers
-          ctx.strokeStyle = '#9c968b';
-          ctx.lineWidth = 4;
-          ctx.beginPath();
-          ctx.moveTo(deckP.x - 14, deckP.y + 2);
-          ctx.lineTo(deckP.x - 14, p.y + 6);
-          ctx.moveTo(deckP.x + 14, deckP.y + 2);
-          ctx.lineTo(deckP.x + 14, p.y + 6);
-          ctx.stroke();
-          drawIsoPrism(ctx, deckP.x, deckP.y + 3, 1.0, 0.96, 4, '#5a606b', '#4d535e', { inset: 0.01 });
-          // Centerline
-          ctx.strokeStyle = '#f0c748';
-          ctx.lineWidth = 1.8;
-          ctx.beginPath();
-          ctx.moveTo(deckP.x - 8, deckP.y - 4);
-          ctx.lineTo(deckP.x + 8, deckP.y + 4);
-          ctx.stroke();
-          if ((tx + ty) % 2 === 0 && night > 0.18) {
-            lights.push({ x: deckP.x, y: deckP.y - 12, r: 34, color: '255, 224, 145', alpha: night * 0.42 });
-          }
-        } else if (surf === SurfaceType.GatorFence) {
-          ctx.strokeStyle = '#333a36';
-          ctx.lineWidth = 2.2;
-          ctx.beginPath();
-          ctx.moveTo(cW[0], cW[1] - 6);
-          ctx.lineTo(cE[0], cE[1] - 6);
-          ctx.moveTo(cN[0], cN[1] - 6);
-          ctx.lineTo(cS[0], cS[1] - 6);
-          ctx.stroke();
+        // ===== HANDCRAFTED 16-BIT SURFACES =====
+        const surf = tiles.surface[i];
+        if (surf !== SurfaceType.None && surf !== SurfaceType.GatorFence) {
+          this.drawSurfaceTile(ctx, state, tx, ty, ix, iy, elev, waterStage, surf, night, lights, atlas);
         }
       }
     }
 
-    // ===== PASS 2: DEPTH-SORTED LEVEES, BUILDINGS, TREES, STUDENTS, VEHICLES, GATORS & PIROGUES =====
-    const drawList: DrawItem[] = [];
-    const autumnAmt = state.month === 11 ? 1 : state.month === 10 ? 0.45 : 0;
-    const windSway = Math.sin(elapsed * (2.2 + state.windStrength * 4.5)) * (1.2 + state.windStrength * 5.5);
+    // ===== PASS 2: DEPTH-SORTED 16-BIT SPRITES =====
+    type RenderItem = { depth: number; draw: () => void };
+    const items: RenderItem[] = [];
 
-    // 2a. Continuous Earthen Levees (+6 ft), Concrete Floodwalls (+12 ft) & Floodgates
+    // 2a. Levees, Floodwalls, Floodgates, Gator Fences
     for (let ty = 0; ty < MAP_SIZE; ty++) {
       for (let tx = 0; tx < MAP_SIZE; tx++) {
         const i = idx(tx, ty);
-        if (tiles.crest[i] <= 0) continue;
-        const p = tileToIso(tx + 0.5, ty + 0.5, tiles.elev[i]);
+        const f = tiles.flags[i];
+        const hasLevee = tiles.crest[i] > 0.3;
+        const hasWall = (f & TileFlag.Floodwall) !== 0;
+        const hasGate = (f & TileFlag.Floodgate) !== 0;
+        const hasFence = tiles.surface[i] === SurfaceType.GatorFence;
+        if (!hasLevee && !hasWall && !hasGate && !hasFence) continue;
+        const elev = tiles.elev[i];
+        const p = tileToIso(tx + 0.5, ty + 0.5, elev);
         if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
-        const isWall = (tiles.flags[i] & TileFlag.Floodwall) !== 0;
-        const isGate = (tiles.flags[i] & TileFlag.Floodgate) !== 0;
-        const hPx = isWall ? 34 : 18;
-        drawList.push({
-          depth: tx + ty + 0.5,
+
+        items.push({
+          depth: tx + ty + 0.45,
           draw: () => {
-            if (isGate) {
-              drawIsoPrism(ctx, p.x, p.y, 0.96, 0.96, hPx + 4, '#7d8691', '#9aa3ae', { inset: 0.02 });
-            } else if (isWall) {
-              drawIsoPrism(ctx, p.x, p.y, 0.82, 0.82, hPx, '#b8bdc4', '#d4d8de', { inset: 0.08 });
-            } else {
-              drawIsoPrism(ctx, p.x, p.y, 1.0, 1.0, hPx, '#5f7e3c', '#769a4a', { inset: 0.02 });
-            }
+            const sp = hasGate
+              ? getStructureSprite(state.storm.active ? 'floodgate_closed' : 'floodgate_open')
+              : hasWall
+                ? getStructureSprite('floodwall')
+                : hasLevee
+                  ? getStructureSprite('levee')
+                  : getStructureSprite('fence');
+            ctx.drawImage(sp.canvas, Math.round(p.x - sp.anchorX), Math.round(p.y - sp.anchorY));
           },
         });
       }
@@ -529,328 +456,446 @@ export class Renderer2D {
     // 2b. Buildings
     for (const b of state.buildings) {
       if (!b) continue;
-      let sumE = 0;
-      let cnt = 0;
+      const cxT = b.tx + b.w * 0.5;
+      const cyT = b.ty + b.h * 0.5;
+      let maxElev = 0;
       for (let dy = 0; dy < b.h; dy++) {
         for (let dx = 0; dx < b.w; dx++) {
-          if (inBounds(b.tx + dx, b.ty + dy)) {
-            sumE += tiles.elev[idx(b.tx + dx, b.ty + dy)];
-            cnt++;
-          }
+          const ii = idx(b.tx + dx, b.ty + dy);
+          if (tiles.elev[ii] > maxElev) maxElev = tiles.elev[ii];
         }
       }
-      const baseE = Math.max(0.2, sumE / Math.max(1, cnt));
-      const pos = tileToIso(b.tx + b.w * 0.5, b.ty + b.h * 0.5, baseE);
-      if (pos.x < minWX - 120 || pos.x > maxWX + 120 || pos.y < minWY - 120 || pos.y > maxWY + 120) continue;
+      const p = tileToIso(cxT, cyT, maxElev);
+      if (p.x < minWX - 140 || p.x > maxWX + 140 || p.y < minWY - 160 || p.y > maxWY + 160) continue;
 
-      drawList.push({
+      items.push({
         depth: b.tx + b.w - 0.5 + (b.ty + b.h - 0.5),
-        draw: () => drawBuilding2D(ctx, state, b, baseE, elapsed, night, lights),
+        draw: () => drawBuilding2D(ctx, b, p.x, p.y, state, elapsed, night, lights),
       });
     }
 
-    // 2c. Vegetation (Live Oaks, Bald Cypress, Azaleas, Palmettos)
-    for (const v of state.veg) {
-      const e = tiles.elev[idx(v.tx, v.ty)];
-      const p = tileToIso(v.tx + 0.5, v.ty + 0.5, e);
+    // 2c. Louisiana Trees & Flora
+    const isAutumn = state.season === 'fall';
+    for (const tree of state.veg) {
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.tx)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.ty)));
+      const elev = Math.max(0.25, tiles.elev[idx(txI, tyI)]);
+      const p = tileToIso(tree.tx, tree.ty, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
-      drawList.push({
-        depth: v.tx + v.ty + 0.65,
-        draw: () => drawTree2D(ctx, v.kind, p.x, p.y, v.scale, windSway * (0.7 + (v.id % 5) * 0.12), autumnAmt),
+
+      items.push({
+        depth: tree.tx + tree.ty - 0.15,
+        draw: () => drawTree2D(ctx, tree, p.x, p.y, elapsed, isAutumn),
       });
     }
 
-    // 2d. Strolling 2D Students (purple/gold/white/lavender shirts + umbrellas in rain!)
-    for (const a of state.agents) {
-      const tx = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(a.x)));
-      const ty = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(a.y)));
-      const ti = idx(tx, ty);
-      const surf = tiles.surface[ti];
-      const elev =
-        surf === SurfaceType.Bridge
-          ? Math.max(tiles.elev[ti] + 1.1, 3.6)
-          : surf === SurfaceType.Boardwalk
-            ? Math.max(tiles.elev[ti] + 0.9, 2.2)
-            : tiles.elev[ti];
-      const p = tileToIso(a.x, a.y, elev);
+    // 2d. Roaming 16-Bit Pixel Students!
+    for (const s of state.agents) {
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.x)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(s.y)));
+      const tileI = idx(txI, tyI);
+      const isBoard = tiles.surface[tileI] === SurfaceType.Boardwalk || tiles.surface[tileI] === SurfaceType.Bridge;
+      const elev = isBoard ? Math.max(tiles.elev[tileI], waterStage + 0.9) : Math.max(0.25, tiles.elev[tileI]);
+      const p = tileToIso(s.x, s.y, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
-      const bob = Math.abs(Math.sin(elapsed * 5.0 + a.phaseOffset)) * 2.2;
-      const col =
-        a.shirt === 'purple' ? '#5e2ca5' : a.shirt === 'gold' ? '#f5b700' : a.shirt === 'lavender' ? '#a67de8' : '#f2eff7';
 
-      drawList.push({
-        depth: a.x + a.y + 0.1,
-        draw: () => {
-          ctx.fillStyle = 'rgba(20,16,40,0.28)';
-          ctx.beginPath();
-          ctx.ellipse(p.x, p.y + 1, 3.2, 1.6, 0, 0, Math.PI * 2);
-          ctx.fill();
-          // Shirt body + head
-          ctx.fillStyle = col;
-          ctx.fillRect(p.x - 2.3, p.y - 7.5 - bob, 4.6, 6.2);
-          ctx.fillStyle = '#ebcaa8';
-          ctx.beginPath();
-          ctx.arc(p.x, p.y - 9.5 - bob, 2.3, 0, Math.PI * 2);
-          ctx.fill();
-          if (a.hasUmbrella) {
-            drawIsoDome(ctx, p.x, p.y - 11.5 - bob, 5.5, 3.5, '#5e2ca5');
-          }
-        },
+      items.push({
+        depth: s.x + s.y + 0.05,
+        draw: () => drawPixelStudent(ctx, p.x, p.y, s.shirt, elapsed * 6 + s.phaseOffset, s.hasUmbrella && state.rainRate > 0.2),
       });
     }
 
-    // 2e. Alligators (with glowing red night eyes!)
+    // 2e. Bayou Alligators!
     for (const g of state.gators) {
-      const tx = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.x)));
-      const ty = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.y)));
-      const elev = Math.max(tiles.elev[idx(tx, ty)], waterStage);
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.x)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(g.y)));
+      const elev = Math.max(waterStage, tiles.elev[idx(txI, tyI)]);
       const p = tileToIso(g.x, g.y, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
-      drawList.push({
-        depth: g.x + g.y + 0.15,
-        draw: () => {
-          ctx.fillStyle = '#3b522a';
-          ctx.beginPath();
-          ctx.ellipse(p.x, p.y - 2, 9 * g.size, 3.5 * g.size, 0, 0, Math.PI * 2);
-          ctx.fill();
-          // Signature glowing red alligator eyes on the water at night!
-          ctx.fillStyle = '#ff2828';
-          ctx.fillRect(p.x + 5, p.y - 4.5, 2, 2);
-          ctx.fillRect(p.x + 8, p.y - 3.5, 2, 2);
-          if (night > 0.3) {
-            lights.push({ x: p.x + 6, y: p.y - 4, r: 10, color: '255, 40, 40', alpha: night * 0.65 });
-          }
-        },
+      items.push({
+        depth: g.x + g.y,
+        draw: () => drawPixelGator(ctx, p.x, p.y, elapsed + g.id),
       });
     }
 
-    // 2f. Pirogues & Cajun Navy Rescue Flatboats
+    // 2f. Cajun Pirogues (along bayou spline!)
     const spline = state.plot.bayouSpline;
-    for (const pr of state.pirogues) {
-      if (spline.length < 2) continue;
-      const sIdx = Math.max(0, Math.min(spline.length - 2, Math.floor(pr.splinePos)));
-      const frac = pr.splinePos - sIdx;
-      const i0 = spline[sIdx];
-      const i1 = spline[sIdx + 1];
-      const fx = (i0 % MAP_SIZE) + ((i1 % MAP_SIZE) - (i0 % MAP_SIZE)) * frac + 0.5;
-      const fy = ((i0 / MAP_SIZE) | 0) + (((i1 / MAP_SIZE) | 0) - ((i0 / MAP_SIZE) | 0)) * frac + 0.5;
-      const p = tileToIso(fx, fy, waterStage);
-      if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
-      drawList.push({
-        depth: fx + fy + 0.2,
-        draw: () => {
-          const bob = Math.sin(elapsed * 3 + pr.id) * 1.2;
-          ctx.fillStyle = pr.cajunNavy ? '#c8d2dc' : '#7a5230';
-          ctx.beginPath();
-          ctx.ellipse(p.x, p.y - 2 + bob, 11, 4.5, -0.35, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = pr.cajunNavy ? '#ff6b22' : '#5e2ca5';
-          ctx.fillRect(p.x - 3, p.y - 8 + bob, 4, 5);
-          ctx.fillStyle = pr.cajunNavy ? '#ff9f1c' : '#f5b700';
-          ctx.fillRect(p.x + 2, p.y - 7 + bob, 4, 5);
-        },
-      });
+    if (spline.length >= 2) {
+      for (const pr of state.pirogues) {
+        const fIdx = Math.max(0, Math.min(spline.length - 1.001, pr.splinePos * (spline.length - 1)));
+        const k0 = Math.floor(fIdx);
+        const frac = fIdx - k0;
+        const t0 = spline[k0];
+        const t1 = spline[Math.min(spline.length - 1, k0 + 1)];
+        const x0 = (t0 % MAP_SIZE) + 0.5;
+        const y0 = Math.floor(t0 / MAP_SIZE) + 0.5;
+        const x1 = (t1 % MAP_SIZE) + 0.5;
+        const y1 = Math.floor(t1 / MAP_SIZE) + 0.5;
+        const bx = x0 + (x1 - x0) * frac;
+        const by = y0 + (y1 - y0) * frac;
+        const bob = Math.sin(elapsed * 2.5 + pr.id) * 1.2;
+        const p = tileToIso(bx, by, waterStage);
+        if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
+        items.push({
+          depth: bx + by,
+          draw: () => drawPixelPirogue(ctx, p.x, p.y + bob, pr.cajunNavy),
+        });
+      }
     }
 
-    // 2g. Road-Only Vehicles (Campus Shuttles, Fogger Trucks, Wildlife Officers & Mardi Gras Floats!)
-    this.confettiAccum += dt;
-    const emitConfetti = this.confettiAccum > 0.16;
-    if (emitConfetti) this.confettiAccum = 0;
-
+    // 2g. Road-Only 16-Bit Vehicles (Fogger Trucks, Shuttles & Mardi Gras Floats!)
     for (const v of state.vehicles) {
-      const tx = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(v.x)));
-      const ty = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(v.y)));
-      const ti = idx(tx, ty);
-      const surf = tiles.surface[ti];
-      const elev = surf === SurfaceType.Bridge ? Math.max(tiles.elev[ti] + 1.1, 3.6) : tiles.elev[ti];
+      if (!v.active) continue;
+      const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(v.x)));
+      const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(v.y)));
+      const tileI = idx(txI, tyI);
+      const isBr = tiles.surface[tileI] === SurfaceType.Bridge;
+      const elev = isBr ? Math.max(tiles.elev[tileI], waterStage + 1.0) : Math.max(0.25, tiles.elev[tileI]);
       const p = tileToIso(v.x, v.y, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
 
-      if (v.kind === 'parade_float' && emitConfetti) {
-        this.spawnConfetti(p.x, p.y);
+      if (v.kind === 'parade_float') {
+        this.confettiTimer += dt;
+        if (this.confettiTimer > 0.09) {
+          this.confettiTimer = 0;
+          this.spawnConfetti(p.x, p.y);
+        }
+        lights.push({ x: p.x, y: p.y - 16, r: 42, color: '255, 224, 110', alpha: 0.35 });
       }
 
-      drawList.push({
-        depth: v.x + v.y + 0.25,
+      items.push({
+        depth: v.x + v.y + 0.12,
         draw: () => {
-          if (v.kind === 'shuttle') {
-            drawIsoPrism(ctx, p.x, p.y - 1, 0.42, 0.72, 10, '#461d7c', '#f5b700', { inset: 0.01 });
-            if (night > 0.2) lights.push({ x: p.x, y: p.y - 4, r: 24, color: '255, 240, 175', alpha: night * 0.42 });
-          } else if (v.kind === 'fogger') {
-            drawIsoPrism(ctx, p.x, p.y - 1, 0.38, 0.62, 8, '#edf2f7', '#389cb5', { inset: 0.01 });
-            if (v.active) {
-              ctx.fillStyle = 'rgba(220, 246, 255, 0.45)';
-              ctx.beginPath();
-              ctx.arc(p.x - 10, p.y - 6, 8 + Math.sin(elapsed * 6) * 2, 0, Math.PI * 2);
-              ctx.fill();
-            }
-          } else if (v.kind === 'officer') {
-            ctx.fillStyle = '#2d6b3e';
-            ctx.fillRect(p.x - 2.6, p.y - 9, 5.2, 7.5);
-            ctx.fillStyle = '#9e7545';
-            ctx.fillRect(p.x - 4.5, p.y - 12, 9, 2.2);
-          } else if (v.kind === 'parade_float') {
-            const cols = ['#6b28b8', '#f5b700', '#1ca65c'];
-            const c = cols[(v.floatIndex ?? 0) % 3];
-            drawIsoPrism(ctx, p.x, p.y - 1, 0.65, 1.0, 14, c, '#ffd228', { inset: 0.01 });
-            drawIsoDome(ctx, p.x, p.y - 15, 9, 9, v.floatIndex === 1 ? '#1ca65c' : '#ffd228');
-            lights.push({ x: p.x, y: p.y - 10, r: 42, color: '255, 210, 90', alpha: 0.42 });
+          drawPixelVehicle(ctx, p.x, p.y, v.kind, v.floatIndex ?? 0);
+          if (v.kind === 'fogger') {
+            ctx.fillStyle = 'rgba(220, 250, 255, 0.55)';
+            ctx.fillRect(Math.round(p.x - 16), Math.round(p.y - 8), 6, 4);
+            ctx.fillRect(Math.round(p.x - 22), Math.round(p.y - 11), 5, 4);
           }
         },
       });
     }
 
-    // Sort all objects strictly back-to-front and draw!
-    drawList.sort((a, b) => a.depth - b.depth);
-    for (const item of drawList) item.draw();
+    items.sort((a, b) => a.depth - b.depth);
+    for (const it of items) it.draw();
 
-    // ===== PASS 3: CIRCLING PINK ROSEATE SPOONBILLS OVER ROOKERY =====
-    if (state.spoonbillCount > 0) {
-      const rookery = state.buildings.find((b) => b && b.type === 'rookery' && b.built >= 1);
-      const rPos = rookery ? tileToIso(rookery.tx + 1, rookery.ty + 1, 2) : tileToIso(22, 36, 2);
-      const count = Math.min(10, state.spoonbillCount);
-      for (let i = 0; i < count; i++) {
-        const ang = elapsed * (0.55 + (i % 3) * 0.1) + (i / count) * Math.PI * 2;
-        const bx = rPos.x + Math.cos(ang) * (58 + (i % 3) * 20);
-        const by = rPos.y - 72 + Math.sin(ang) * 26;
-        const flap = Math.sin(elapsed * 9 + i * 1.5) * 4;
-        ctx.strokeStyle = '#ff85b5';
-        ctx.lineWidth = 2.4;
-        ctx.beginPath();
-        ctx.moveTo(bx - 7, by + flap);
-        ctx.lineTo(bx, by);
-        ctx.lineTo(bx + 7, by + flap);
-        ctx.stroke();
+    // 2h. Circling Roseate Spoonbills (crisp 16-bit pink birds above marshes!)
+    const birdCount = Math.min(8, Math.max(2, state.spoonbillCount));
+    const cc = state.plot.chenierCenter;
+    for (let bi = 0; bi < birdCount; bi++) {
+      const ang = elapsed * (0.28 + (bi % 3) * 0.07) + bi * 1.3;
+      const rad = 7 + (bi % 4) * 3.5;
+      const bxT = cc.tx + Math.cos(ang) * rad;
+      const byT = cc.ty + Math.sin(ang) * rad;
+      const p = tileToIso(bxT, byT, 12 + Math.sin(elapsed * 2 + bi) * 1.5);
+      if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
+      const flap = Math.round(Math.sin(elapsed * 10 + bi * 2) * 2.5);
+      const bx = Math.round(p.x);
+      const by = Math.round(p.y);
+      ctx.fillStyle = '#23152b';
+      ctx.fillRect(bx - 5, by - 1, 10, 3);
+      ctx.fillStyle = '#ff7eb6';
+      ctx.fillRect(bx - 4, by - flap, 3, 2);
+      ctx.fillRect(bx - 1, by, 3, 2);
+      ctx.fillRect(bx + 2, by - flap, 3, 2);
+    }
+
+    // ===== PASS 3: PIXEL PLACEMENT GHOST & MAGNETIC SNAP PREVIEW =====
+    if (ghost.toolId || ghost.bulldoze) {
+      const spec = ghost.toolId ? CATALOG[ghost.toolId] : null;
+      const w = spec ? (ghost.rot % 2 === 1 ? spec.h : spec.w) : 1;
+      const h = spec ? (ghost.rot % 2 === 1 ? spec.w : spec.h) : 1;
+      if (inBounds(ghost.tx, ghost.ty)) {
+        const elev = Math.max(0.25, tiles.elev[idx(ghost.tx, ghost.ty)]);
+        const p = tileToIso(ghost.tx + w * 0.5, ghost.ty + h * 0.5, elev);
+        const c = footprintCorners(p.x, p.y, w, h, 0.02);
+        const fill = ghost.bulldoze
+          ? 'rgba(235, 62, 62, 0.44)'
+          : !ghost.valid
+            ? 'rgba(235, 62, 62, 0.42)'
+            : ghost.snapped
+              ? 'rgba(255, 212, 52, 0.46)'
+              : 'rgba(66, 224, 120, 0.40)';
+        const stroke = ghost.bulldoze || !ghost.valid ? '#ff5252' : ghost.snapped ? '#ffe45e' : '#58f28d';
+        drawPoly(ctx, [c.n, c.e, c.s, c.w], fill, stroke, 2);
       }
     }
 
-    // ===== PASS 4: PLACEMENT GHOST PREVIEW =====
-    if ((ghost.toolId || ghost.bulldoze) && inBounds(ghost.tx, ghost.ty)) {
-      const def = ghost.toolId ? CATALOG[ghost.toolId] : null;
-      const w = def ? (ghost.rot % 2 === 1 ? def.h : def.w) : 1;
-      const h = def ? (ghost.rot % 2 === 1 ? def.w : def.h) : 1;
-      const baseE = Math.max(0.2, tiles.elev[idx(ghost.tx, ghost.ty)]);
-      const gp = tileToIso(ghost.tx + w * 0.5, ghost.ty + h * 0.5, baseE);
-      const lift = ghost.pilings && def?.canPilings ? 3.0 * ELEV_PX : 0;
-      const fillCol = ghost.bulldoze || !ghost.valid
-        ? 'rgba(255, 72, 92, 0.45)'
-        : ghost.snapped
-          ? 'rgba(245, 200, 66, 0.50)'
-          : 'rgba(62, 240, 142, 0.45)';
-      const strokeCol = ghost.bulldoze || !ghost.valid ? '#ff384c' : ghost.snapped ? '#f5b700' : '#24d678';
-      const fc = footprintCorners(gp.x, gp.y - lift, w, h, 0.04);
-      drawPoly(ctx, [fc.n, fc.e, fc.s, fc.w], fillCol, strokeCol, 2.2);
-      if (lift > 0) {
-        const gf = footprintCorners(gp.x, gp.y, w, h, 0.04);
-        drawPoly(ctx, [gf.n, gf.e, gf.s, gf.w], 'rgba(245, 200, 66, 0.20)', strokeCol, 1.2);
-      }
-    }
-
-    // ===== PASS 5: TOUCHDOWN FIREWORKS & MARDI GRAS CONFETTI PARTICLES =====
-    if (state.football.fireworkBurstTick !== this.lastBurstTick && state.football.fireworkBurstTick > 0) {
-      this.lastBurstTick = state.football.fireworkBurstTick;
-      const stad = state.buildings.find((b) => b && (b.type === 'stadium' || b.type === 'practice_field'));
+    // ===== PASS 4: PIXEL FIREWORKS & CONFETTI =====
+    if (state.football.fireworkBurstTick > 0 && state.football.fireworkBurstTick !== this.lastFireworkTick) {
+      this.lastFireworkTick = state.football.fireworkBurstTick;
+      const stad = state.buildings.find((b) => b && b.type === 'stadium');
       if (stad) {
-        const sp = tileToIso(stad.tx + stad.w * 0.5, stad.ty + stad.h * 0.5, tiles.elev[idx(stad.tx, stad.ty)]);
-        this.spawnFireworks(sp.x, sp.y - 36);
+        const sp = tileToIso(stad.tx + stad.w * 0.5, stad.ty + stad.h * 0.5, 4);
+        this.spawnFireworks(sp.x, sp.y - 30);
       }
     }
-
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const pt = this.particles[i];
+    for (let pi = this.particles.length - 1; pi >= 0; pi--) {
+      const pt = this.particles[pi];
       pt.life -= dt;
       if (pt.life <= 0) {
-        this.particles.splice(i, 1);
+        this.particles.splice(pi, 1);
         continue;
       }
-      pt.vy += 85 * dt;
       pt.x += pt.vx * dt;
       pt.y += pt.vy * dt;
-      ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
+      pt.vy += 46 * dt;
+      ctx.globalAlpha = Math.max(0, Math.min(1, pt.life / pt.maxLife));
       ctx.fillStyle = pt.color;
-      ctx.fillRect(pt.x - pt.size * 0.5, pt.y - pt.size * 0.5, pt.size, pt.size);
+      ctx.fillRect(Math.round(pt.x), Math.round(pt.y), pt.size, pt.size);
     }
     ctx.globalAlpha = 1;
 
-    // ===== PASS 6: LUMINOUS MOONLIT NIGHT TINT, WARM ADDITIVE GLOWS & FIREFLIES =====
-    // Soft night cursor lantern under hovered tile!
-    if (night > 0.15 && cursorTile && inBounds(cursorTile.tx, cursorTile.ty)) {
-      const cp = tileToIso(cursorTile.tx + 0.5, cursorTile.ty + 0.5, tiles.elev[idx(cursorTile.tx, cursorTile.ty)]);
-      lights.push({ x: cp.x, y: cp.y, r: 95, color: '255, 232, 175', alpha: night * 0.34 });
+    // ===== PASS 5: LUMINOUS BAYOU NIGHT, ADDITIVE GLOWS & PIXEL FIREFLIES =====
+    if (night > 0.05 || storm > 0.15) {
+      const nightAlpha = this.camera.brightNight
+        ? night * 0.34 + storm * 0.18
+        : night * 0.56 + storm * 0.22;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(18, 26, 56, ${Math.min(0.62, nightAlpha)})`;
+      ctx.fillRect(0, 0, pw, ph);
+      ctx.restore();
+    } else if (golden > 0.08) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(255, 162, 68, ${golden * 0.12})`;
+      ctx.fillRect(0, 0, pw, ph);
+      ctx.restore();
     }
 
-    // Golden marsh fireflies at night!
-    if (night > 0.25 && !state.storm.active) {
-      ctx.fillStyle = `rgba(255, 234, 120, ${(night - 0.25) * 0.95})`;
-      for (let f = 0; f < 45; f++) {
-        const fx = this.camera.x + Math.sin(elapsed * 0.45 + f * 3.7) * 460;
-        const fy = this.camera.y + Math.cos(elapsed * 0.38 + f * 2.3) * 260;
-        const r = 1.6 + Math.sin(elapsed * 4 + f) * 0.9;
-        ctx.beginPath();
-        ctx.arc(fx, fy, Math.max(0.5, r), 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    ctx.restore(); // End world camera transform
-
-    // Screen-space atmospheric tint (DIM moonlit indigo — NEVER super dark!)
-    if (night > 0.04) {
-      const maxAlpha = this.camera.brightNight ? 0.24 : 0.38;
-      ctx.fillStyle = `rgba(22, 26, 68, ${night * maxAlpha})`;
-      ctx.fillRect(0, 0, this.viewW, this.viewH);
-    }
-    if (golden > 0.05) {
-      ctx.fillStyle = `rgba(255, 160, 75, ${golden * 0.12})`;
-      ctx.fillRect(0, 0, this.viewW, this.viewH);
-    }
-    if (storm > 0.15) {
-      ctx.fillStyle = `rgba(28, 42, 58, ${storm * 0.28})`;
-      ctx.fillRect(0, 0, this.viewW, this.viewH);
-    }
-
-    // Additive warm light halos (streetlamps, windows, bell tower, 6 stadium masts, cursor lantern!)
-    if (lights.length > 0) {
+    if (lights.length > 0 && (night > 0.15 || state.football.active || state.parade.active)) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.translate(this.viewW * 0.5 + sxShake, this.viewH * 0.5 + syShake);
-      ctx.scale(this.camera.zoom, this.camera.zoom);
-      ctx.translate(-this.camera.x, -this.camera.y);
-      for (const l of lights) {
-        const g = ctx.createRadialGradient(l.x, l.y, 1, l.x, l.y, l.r);
-        g.addColorStop(0, `rgba(${l.color}, ${l.alpha})`);
-        g.addColorStop(1, `rgba(${l.color}, 0)`);
+      for (const lg of lights) {
+        const g = ctx.createRadialGradient(lg.x, lg.y, 2, lg.x, lg.y, lg.r);
+        g.addColorStop(0, `rgba(${lg.color}, ${lg.alpha})`);
+        g.addColorStop(0.55, `rgba(${lg.color}, ${lg.alpha * 0.42})`);
+        g.addColorStop(1, `rgba(${lg.color}, 0)`);
         ctx.fillStyle = g;
         ctx.beginPath();
-        ctx.arc(l.x, l.y, l.r, 0, Math.PI * 2);
+        ctx.arc(lg.x, lg.y, lg.r, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.restore();
     }
 
-    // Slanted 2D Rain Streaks + Lightning Flash
+    // Crisp Glowing Pixel Fireflies!
+    if (night > 0.3) {
+      ctx.fillStyle = '#fff08a';
+      for (let fi = 0; fi < 38; fi++) {
+        const fx = ((fi * 97.3) % 52) + 6 + Math.sin(elapsed * 0.9 + fi) * 1.4;
+        const fy = ((fi * 53.7) % 52) + 6 + Math.cos(elapsed * 1.1 + fi * 1.7) * 1.4;
+        const fp = tileToIso(fx, fy, 4 + Math.sin(elapsed * 2 + fi) * 1.2);
+        if (fp.x < minWX || fp.x > maxWX || fp.y < minWY || fp.y > maxWY) continue;
+        if (Math.sin(elapsed * 3.8 + fi * 2.1) > 0.15) {
+          ctx.fillRect(Math.round(fp.x), Math.round(fp.y), 2, 2);
+        }
+      }
+    }
+
+    // Warm Pointer Lantern at night
+    if (night > 0.25 && cursorTile && inBounds(cursorTile.tx, cursorTile.ty)) {
+      const cp = tileToIso(cursorTile.tx + 0.5, cursorTile.ty + 0.5, Math.max(0.5, tiles.elev[idx(cursorTile.tx, cursorTile.ty)]));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const lg = ctx.createRadialGradient(cp.x, cp.y, 4, cp.x, cp.y, 82);
+      lg.addColorStop(0, `rgba(255, 224, 150, ${night * 0.24})`);
+      lg.addColorStop(1, 'rgba(255, 224, 150, 0)');
+      ctx.fillStyle = lg;
+      ctx.beginPath();
+      ctx.arc(cp.x, cp.y, 82, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // Crisp Pixel Slanted Rain Streaks + Lightning Flash!
     const rainRate = Math.max(state.rainRate, state.storm.active ? state.storm.rainRate : 0);
     if (rainRate > 0.08) {
-      const drops = Math.floor(140 * rainRate);
-      const slant = 12 + state.windStrength * 26;
-      ctx.strokeStyle = 'rgba(205, 228, 248, 0.44)';
-      ctx.lineWidth = 1.2;
+      const drops = Math.floor(110 * rainRate);
+      const slant = Math.round(6 + state.windStrength * 14);
+      ctx.strokeStyle = 'rgba(195, 232, 255, 0.52)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
       for (let d = 0; d < drops; d++) {
-        const rx = ((d * 97 + elapsed * 420) % (this.viewW + 120)) - 60;
-        const ry = ((d * 131 + elapsed * 780) % (this.viewH + 120)) - 60;
+        const rx = Math.round(((d * 73 + elapsed * 290) % (pw + 80)) - 40);
+        const ry = Math.round(((d * 109 + elapsed * 540) % (ph + 80)) - 40);
         ctx.moveTo(rx, ry);
-        ctx.lineTo(rx - slant * 0.45, ry + 18);
+        ctx.lineTo(rx - Math.round(slant * 0.45), ry + 11);
       }
       ctx.stroke();
     }
 
     if (lightning > 0.05) {
-      ctx.fillStyle = `rgba(225, 240, 255, ${lightning * 0.42})`;
-      ctx.fillRect(0, 0, this.viewW, this.viewH);
+      ctx.fillStyle = `rgba(230, 245, 255, ${lightning * 0.42})`;
+      ctx.fillRect(0, 0, pw, ph);
     }
 
     ctx.restore();
+
+    // Upscale the crisp 16-bit virtual buffer onto the display canvas with ZERO blur!
+    this.ctx.imageSmoothingEnabled = false;
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.ctx.drawImage(this.pxCanvas, 0, 0, pw, ph, 0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  private drawSurfaceTile(
+    ctx: CanvasRenderingContext2D,
+    state: GameState,
+    tx: number,
+    ty: number,
+    ix: number,
+    iy: number,
+    elev: number,
+    waterStage: number,
+    surf: SurfaceType,
+    night: number,
+    lights: LightGlow[],
+    atlas: ReturnType<typeof getTerrainAtlas>,
+  ): void {
+    const tiles = state.tiles;
+    const isRoadLike = (x: number, y: number): boolean =>
+      inBounds(x, y) &&
+      (tiles.surface[idx(x, y)] === SurfaceType.Road || tiles.surface[idx(x, y)] === SurfaceType.Bridge);
+    const isPathLike = (x: number, y: number): boolean =>
+      inBounds(x, y) &&
+      (tiles.surface[idx(x, y)] === SurfaceType.Path ||
+        tiles.surface[idx(x, y)] === SurfaceType.Boardwalk ||
+        tiles.surface[idx(x, y)] === SurfaceType.Quad ||
+        tiles.surface[idx(x, y)] === SurfaceType.ParadeGround);
+
+    if (surf === SurfaceType.Path) {
+      ctx.drawImage(atlas.brick.canvas, ix - 32, iy - 16);
+      if ((tx + ty) % 6 === 0) {
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(ix + 12, iy - 16, 2, 14);
+        ctx.fillStyle = night > 0.2 ? '#fff08a' : '#d8e0e8';
+        ctx.fillRect(ix + 11, iy - 18, 4, 3);
+        if (night > 0.2) {
+          lights.push({ x: ix + 13, y: iy - 16, r: 34, color: '255, 224, 130', alpha: night * 0.34 });
+        }
+      }
+      return;
+    }
+
+    if (surf === SurfaceType.Quad) {
+      ctx.drawImage(atlas.quad.canvas, ix - 32, iy - 16);
+      if ((tx + ty) % 5 === 0) {
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(ix - 5, iy - 3, 10, 5);
+        ctx.fillStyle = '#b5743c';
+        ctx.fillRect(ix - 4, iy - 2, 8, 3);
+      }
+      return;
+    }
+
+    if (surf === SurfaceType.ParadeGround) {
+      ctx.drawImage(atlas.plaza.canvas, ix - 32, iy - 16);
+      return;
+    }
+
+    if (surf === SurfaceType.Road) {
+      ctx.drawImage(atlas.road.canvas, ix - 32, iy - 16);
+      const rE = isRoadLike(tx + 1, ty);
+      const rW = isRoadLike(tx - 1, ty);
+      const rS = isRoadLike(tx, ty + 1);
+      const rN = isRoadLike(tx, ty - 1);
+
+      ctx.strokeStyle = '#9e978a';
+      ctx.lineWidth = 1.5;
+      if (!rN) { ctx.beginPath(); ctx.moveTo(ix, iy - HALF_H); ctx.lineTo(ix + HALF_W, iy); ctx.stroke(); }
+      if (!rS) { ctx.beginPath(); ctx.moveTo(ix - HALF_W, iy); ctx.lineTo(ix, iy + HALF_H); ctx.stroke(); }
+      if (!rW) { ctx.beginPath(); ctx.moveTo(ix, iy - HALF_H); ctx.lineTo(ix - HALF_W, iy); ctx.stroke(); }
+      if (!rE) { ctx.beginPath(); ctx.moveTo(ix + HALF_W, iy); ctx.lineTo(ix, iy + HALF_H); ctx.stroke(); }
+
+      ctx.strokeStyle = '#ffd84d';
+      ctx.lineWidth = 2;
+      if (rE || rW) {
+        ctx.beginPath();
+        ctx.moveTo(ix - (rW ? 14 : 3), iy - (rW ? 7 : 1));
+        ctx.lineTo(ix + (rE ? 14 : 3), iy + (rE ? 7 : 1));
+        ctx.stroke();
+      }
+      if (rN || rS) {
+        ctx.beginPath();
+        ctx.moveTo(ix + (rN ? 14 : 3), iy - (rN ? 7 : 1));
+        ctx.lineTo(ix - (rS ? 14 : 3), iy + (rS ? 7 : 1));
+        ctx.stroke();
+      }
+
+      const cross = (dx: number, dy: number) => {
+        ctx.fillStyle = '#f5eedc';
+        for (let s = -1; s <= 1; s++) {
+          ctx.fillRect(Math.round(ix + dx + s * 4 - 1), Math.round(iy + dy - s * 2 - 1), 3, 2);
+        }
+      };
+      if (isPathLike(tx + 1, ty)) cross(12, 6);
+      if (isPathLike(tx - 1, ty)) cross(-12, -6);
+      if (isPathLike(tx, ty + 1)) cross(-12, 6);
+      if (isPathLike(tx, ty - 1)) cross(12, -6);
+
+      if ((tx + ty) % 7 === 0) {
+        ctx.fillStyle = '#23152b';
+        ctx.fillRect(ix - 14, iy - 16, 2, 14);
+        ctx.fillStyle = night > 0.2 ? '#fff08a' : '#dfe4ea';
+        ctx.fillRect(ix - 15, iy - 18, 4, 3);
+        if (night > 0.2) {
+          lights.push({ x: ix - 13, y: iy - 16, r: 38, color: '255, 224, 130', alpha: night * 0.36 });
+        }
+      }
+      return;
+    }
+
+    if (surf === SurfaceType.Boardwalk || surf === SurfaceType.Bridge) {
+      const isBr = surf === SurfaceType.Bridge;
+      const deckElev = Math.max(elev, waterStage + (isBr ? 1.0 : 0.7));
+      const liftPx = Math.round(Math.max(4, (deckElev - elev) * ELEV_PX + 4));
+      const dy = iy - liftPx;
+
+      ctx.fillStyle = isBr ? '#6e6a64' : '#472a1c';
+      for (const ox of [-14, 0, 14]) {
+        ctx.fillRect(ix + ox - 2, dy + 4, 4, liftPx + 6);
+        ctx.fillStyle = isBr ? '#9c968c' : '#855832';
+        ctx.fillRect(ix + ox - 2, dy + 4, 2, liftPx + 6);
+        ctx.fillStyle = isBr ? '#6e6a64' : '#472a1c';
+      }
+
+      const dN: [number, number] = [ix, dy - HALF_H];
+      const dE: [number, number] = [ix + HALF_W, dy];
+      const dS: [number, number] = [ix, dy + HALF_H];
+      const dW: [number, number] = [ix - HALF_W, dy];
+      drawPoly(ctx, [dW, dS, [dS[0], dS[1] + 5], [dW[0], dW[1] + 5]], isBr ? '#8c867a' : '#6e4628', '#23152b', 1);
+      drawPoly(ctx, [dS, dE, [dE[0], dE[1] + 5], [dS[0], dS[1] + 5]], isBr ? '#69635a' : '#472a1c', '#23152b', 1);
+      drawPoly(ctx, [dN, dE, dS, dW], isBr ? '#525666' : '#b8824c', '#23152b', 1);
+
+      if (isBr) {
+        ctx.strokeStyle = '#ffd84d';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ix - 12, dy - 6);
+        ctx.lineTo(ix + 12, dy + 6);
+        ctx.stroke();
+        ctx.strokeStyle = '#e2d7c2';
+        ctx.lineWidth = 2;
+        if (!isRoadLike(tx, ty - 1)) {
+          ctx.beginPath(); ctx.moveTo(dN[0], dN[1] - 3); ctx.lineTo(dE[0], dE[1] - 3); ctx.stroke();
+        }
+        if (!isRoadLike(tx, ty + 1)) {
+          ctx.beginPath(); ctx.moveTo(dW[0], dW[1] - 3); ctx.lineTo(dS[0], dS[1] - 3); ctx.stroke();
+        }
+      } else {
+        ctx.strokeStyle = '#6e4628';
+        ctx.lineWidth = 1;
+        for (let k = -10; k <= 10; k += 5) {
+          ctx.beginPath();
+          ctx.moveTo(ix + k - 8, dy + k * 0.5 + 4);
+          ctx.lineTo(ix + k + 8, dy + k * 0.5 - 4);
+          ctx.stroke();
+        }
+      }
+    }
   }
 
   capturePostcard(state: GameState, framed: boolean): string {
@@ -862,35 +907,39 @@ export class Renderer2D {
     out.width = src.width + pad * 2;
     out.height = src.height + pad + footer;
     const c = out.getContext('2d')!;
+    c.imageSmoothingEnabled = false;
 
-    c.fillStyle = '#fbf7ef';
+    c.fillStyle = '#f5ebd2';
     c.fillRect(0, 0, out.width, out.height);
-    c.strokeStyle = '#d9a400';
-    c.lineWidth = 4;
-    c.strokeRect(pad - 4, pad - 4, src.width + 8, src.height + 8);
+    c.strokeStyle = '#23152b';
+    c.lineWidth = 6;
+    c.strokeRect(pad - 6, pad - 6, src.width + 12, src.height + 12);
+    c.strokeStyle = '#f7c21b';
+    c.lineWidth = 3;
+    c.strokeRect(pad - 2, pad - 2, src.width + 4, src.height + 4);
     c.drawImage(src, pad, pad);
 
-    c.fillStyle = '#461D7C';
-    c.font = `700 ${Math.round(Math.max(22, out.width * 0.022))}px Georgia, serif`;
+    c.fillStyle = '#2e1a4a';
+    c.font = `700 ${Math.round(Math.max(20, out.width * 0.020))}px "Courier New", monospace`;
     c.textBaseline = 'middle';
-    c.fillText('GREETINGS FROM BAYOU STATE UNIVERSITY', pad, src.height + pad + footer * 0.42);
+    c.fillText('GREETINGS FROM BAYOU STATE UNIVERSITY', pad, src.height + pad + footer * 0.40);
 
-    c.fillStyle = '#5c536b';
-    c.font = `600 ${Math.round(Math.max(13, out.width * 0.012))}px system-ui, sans-serif`;
+    c.fillStyle = '#5c4b6e';
+    c.font = `700 ${Math.round(Math.max(12, out.width * 0.012))}px "Courier New", monospace`;
     c.fillText(
-      `Year ${state.year}  ·  ${state.economy.students.toLocaleString()} Students  ·  Prestige ${state.economy.prestige}  ·  Campus Lv.${state.economy.campusLevel}`,
+      `YEAR ${state.year}  |  ${state.economy.students.toLocaleString()} STUDENTS  |  PRESTIGE ${state.economy.prestige}  |  LV.${state.economy.campusLevel}`,
       pad,
       src.height + pad + footer * 0.76,
     );
 
-    c.fillStyle = '#F5B700';
-    c.beginPath();
-    c.arc(out.width - pad - 24, src.height + pad + footer * 0.5, 22, 0, Math.PI * 2);
-    c.fill();
-    c.fillStyle = '#461D7C';
-    c.font = 'bold 18px Georgia, serif';
+    c.fillStyle = '#23152b';
+    c.fillRect(out.width - pad - 52, src.height + pad + 14, 48, 44);
+    c.fillStyle = '#f7c21b';
+    c.fillRect(out.width - pad - 49, src.height + pad + 17, 42, 38);
+    c.fillStyle = '#401775';
+    c.font = 'bold 16px "Courier New", monospace';
     c.textAlign = 'center';
-    c.fillText('BSU', out.width - pad - 24, src.height + pad + footer * 0.51);
+    c.fillText('BSU', out.width - pad - 28, src.height + pad + 37);
 
     return out.toDataURL('image/png');
   }

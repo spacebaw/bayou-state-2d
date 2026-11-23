@@ -665,13 +665,13 @@ export class HudController {
       parts.push(`
         <div class="title-scrim">
           <div class="title-card">
-            <div class="title-kicker">HD 2D Isometric Campus Simulation</div>
+            <div class="title-kicker">16-Bit Isometric Campus Simulation</div>
             <h1 class="title-wordmark">BAYOU STATE</h1>
             <div class="title-accent"></div>
             <div class="title-tagline">Build the campus. Beat the swamp. Fill the stadium.</div>
             <div class="title-desc">
-              Charter a 1920s Italian Renaissance Revival university on a Louisiana natural-levee ridge in handcrafted
-              <strong>HD 2D Isometric</strong> diorama art. Engineer levees, canals &amp; flood pilings against Gulf hurricanes — then pack
+              Charter a 1920s Italian Renaissance Revival university on a Louisiana natural-levee ridge in tactile
+              <strong>16-Bit Pixel Art</strong>. Engineer levees, canals &amp; flood pilings against Gulf hurricanes — then pack
               <strong>The Cauldron</strong> for a roaring Saturday night game under the lights.
             </div>
             <div class="title-btns">

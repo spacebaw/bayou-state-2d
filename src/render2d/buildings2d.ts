@@ -1,16 +1,18 @@
-import { BuildingInstance, GameState } from '../sim/types';
+import { CATALOG } from '../sim/catalog';
+import { BuildingId, BuildingInstance, GameState, VegInstance } from '../sim/types';
 import {
-  drawIsoDome,
-  drawIsoHippedRoof,
-  drawIsoPrism,
-  drawPoly,
-  ELEV_PX,
-  footprintCorners,
-  HALF_H,
-  HALF_W,
-  shadeColor,
-  tileToIso,
-} from './iso';
+  bayer4,
+  CachedSprite,
+  drawPxDome,
+  drawPxHippedRoof,
+  drawPxPrism,
+  hash2,
+  hexToRGBA,
+  PAL,
+  PixelBuffer,
+  pxFootprint,
+  shadeRGBA,
+} from './pixel';
 
 export interface LightGlow {
   x: number;
@@ -20,846 +22,976 @@ export interface LightGlow {
   alpha: number;
 }
 
-/**
- * Handcrafted HD 2D Isometric Architectural Painter for all 50+ Bayou State buildings,
- * upgrade tiers, pilings foundations, construction scaffolding, and glowing night lamps!
- */
-export function drawBuilding2D(
-  ctx: CanvasRenderingContext2D,
-  state: GameState,
-  b: BuildingInstance,
-  baseElevFt: number,
-  elapsed: number,
-  nightAmount: number,
-  lightsOut: LightGlow[],
+// ===== SPRITE CACHES (ZERO PER-FRAME RASTERIZATION!) =====
+const buildingCache = new Map<string, CachedSprite>();
+const treeCache = new Map<string, CachedSprite>();
+const entityCache = new Map<string, CachedSprite>();
+
+function drawPxField(
+  pb: PixelBuffer,
+  cx: number,
+  baseY: number,
+  wTiles: number,
+  hTiles: number,
 ): void {
-  const centerTx = b.tx + b.w * 0.5;
-  const centerTy = b.ty + b.h * 0.5;
-  const pos = tileToIso(centerTx, centerTy, baseElevFt);
-  const cx = pos.x;
-  const groundY = pos.y;
-  const lit = b.powered && !b.blackout && b.built >= 1;
-  const pilingsLift = b.pilings ? 3.0 * ELEV_PX : 0;
-  const baseY = groundY - pilingsLift;
+  const c = pxFootprint(cx, baseY, wTiles, hTiles, 0.04);
+  pb.fillPoly([c.n, c.e, c.s, c.w], (x, y) => {
+    const stripe = Math.floor(((x - cx) * 0.14 + (y - baseY) * 0.28) + 20) & 1;
+    return stripe ? PAL.grassHi : PAL.grassLit;
+  });
 
-  // 1. Soft isometric contact AO shadow on the ground
-  const sh = footprintCorners(cx + 5, groundY + 4, b.w + 0.15, b.h + 0.15, 0.05);
-  drawPoly(ctx, [sh.n, sh.e, sh.s, sh.w], 'rgba(26, 20, 52, 0.24)');
+  const lerpPt = (a: [number, number], b: [number, number], t: number): [number, number] => [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+  ];
+  const ez1A = lerpPt(c.n, c.e, 0.15);
+  const ez1B = lerpPt(c.w, c.s, 0.15);
+  pb.fillPoly([c.n, ez1A, ez1B, c.w], PAL.purpleLit);
 
-  // 2. 3D-looking Isometric Pilings Foundation if elevated!
-  if (b.pilings) {
-    const fc = footprintCorners(cx, groundY, b.w, b.h, 0.14);
-    ctx.strokeStyle = '#6e4e32';
-    ctx.lineWidth = 3.2;
-    for (const pt of [fc.w, fc.s, fc.e]) {
-      ctx.beginPath();
-      ctx.moveTo(pt[0], pt[1]);
-      ctx.lineTo(pt[0], pt[1] - pilingsLift);
-      ctx.stroke();
-    }
-    // Mid-span timber piers along SW & SE edges
-    for (const [a, e] of [[fc.w, fc.s], [fc.s, fc.e]]) {
-      const mx = (a[0] + e[0]) * 0.5;
-      const my = (a[1] + e[1]) * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(mx, my);
-      ctx.lineTo(mx, my - pilingsLift);
-      ctx.stroke();
-    }
-    drawIsoPrism(ctx, cx, baseY + 3, b.w, b.h, 4, '#cfc5b0', '#e2dac6', { inset: 0.05 });
+  const ez2A = lerpPt(c.n, c.e, 0.85);
+  const ez2B = lerpPt(c.w, c.s, 0.85);
+  pb.fillPoly([ez2A, c.e, c.s, ez2B], PAL.goldLit);
+
+  for (let k = 2; k <= 8; k++) {
+    const t = k / 10;
+    const p1 = lerpPt(c.n, c.e, t);
+    const p2 = lerpPt(c.w, c.s, t);
+    pb.line(p1[0], p1[1], p2[0], p2[1], PAL.stuccoHi);
+  }
+  pb.fillEllipse(cx, baseY, Math.max(4, wTiles * 2.1), Math.max(2, wTiles * 1.1), PAL.goldHi);
+  pb.fillEllipse(cx, baseY, Math.max(2, wTiles * 1.2), Math.max(1, wTiles * 0.6), PAL.purpleLit);
+  pb.strokePoly([c.n, c.e, c.s, c.w], PAL.stuccoHi);
+
+  const g1 = lerpPt(c.n, c.w, 0.5);
+  const g2 = lerpPt(c.e, c.s, 0.5);
+  for (const g of [g1, g2]) {
+    pb.line(g[0], g[1], g[0], g[1] - 7, PAL.goldHi);
+    pb.hline(g[0] - 3, g[0] + 3, g[1] - 7, PAL.goldHi);
+    pb.line(g[0] - 3, g[1] - 7, g[0] - 3, g[1] - 12, PAL.goldHi);
+    pb.line(g[0] + 3, g[1] - 7, g[0] + 3, g[1] - 12, PAL.goldHi);
+  }
+}
+
+/**
+ * Rasterizes a single handcrafted 16-bit outlined pixel-art building sprite once and caches it.
+ */
+function getBuildingSprite(
+  type: BuildingId,
+  w: number,
+  h: number,
+  tier: number,
+  onPilings: boolean,
+  nightLit: boolean,
+  underConstruction: boolean,
+  flooded: boolean,
+): CachedSprite {
+  const key = `${type}|${w}x${h}|t${tier}|p${onPilings ? 1 : 0}|n${nightLit ? 1 : 0}|c${underConstruction ? 1 : 0}|f${flooded ? 1 : 0}`;
+  const hit = buildingCache.get(key);
+  if (hit) return hit;
+
+  const span = Math.max(w, h);
+  const tallBonus = type === 'bell_tower' || type === 'masscomm_school' || type === 'stadium' || type === 'res_tower' ? 46 : 0;
+  const canvasW = Math.ceil((w + h) * 32 + 76);
+  const canvasH = Math.ceil((w + h) * 16 + 150 + tallBonus);
+  const anchorX = Math.floor(canvasW * 0.5);
+  const anchorY = canvasH - Math.ceil((w + h) * 8 + 18);
+
+  const pb = new PixelBuffer(canvasW, canvasH);
+  const cx = anchorX;
+  const baseY = onPilings ? anchorY - 12 : anchorY;
+
+  // Grounded pixel-dithered SE cast shadow (drawn before outline pass so shadows stay clean!)
+  const fp = pxFootprint(cx, anchorY, w, h, 0.04);
+  const shDist = type === 'bell_tower' ? 32 : Math.min(28, 10 + span * 5);
+  const shY = Math.round(shDist * 0.34);
+  if (type !== 'practice_field' && type !== 'pond' && type !== 'rookery') {
+    pb.fillPoly(
+      [
+        fp.n,
+        [fp.n[0] + shDist, fp.n[1] + shY],
+        [fp.e[0] + shDist, fp.e[1] + shY],
+        [fp.s[0] + shDist, fp.s[1] + shY],
+        fp.s,
+        fp.e,
+      ],
+      (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow,
+    );
   }
 
-  // 3. Construction scaffolding if still building
-  if (b.built < 1) {
-    const h = 14 + b.built * 24;
-    drawIsoPrism(ctx, cx, baseY, b.w, b.h, h, '#c99b5b', '#ddb67c', { inset: 0.12 });
-    const c = footprintCorners(cx, baseY, b.w, b.h, 0.08);
-    ctx.strokeStyle = '#7a5229';
-    ctx.lineWidth = 1.6;
-    for (const pt of [c.n, c.e, c.s, c.w]) {
-      ctx.beginPath();
-      ctx.moveTo(pt[0], pt[1]);
-      ctx.lineTo(pt[0], pt[1] - h - 8);
-      ctx.stroke();
+  // Timber Pilings / Stilts (+6 ft flood immunity!)
+  if (onPilings) {
+    const pC = pxFootprint(cx, anchorY, w, h, 0.14);
+    const pilings: [number, number][] = [
+      pC.n,
+      pC.e,
+      pC.s,
+      pC.w,
+      [(pC.w[0] + pC.s[0]) * 0.5, (pC.w[1] + pC.s[1]) * 0.5],
+      [(pC.s[0] + pC.e[0]) * 0.5, (pC.s[1] + pC.e[1]) * 0.5],
+    ];
+    for (const [px0, py0] of pilings) {
+      pb.rect(px0 - 2, py0 - 13, 3, 14, PAL.woodLit);
+      pb.line(px0 + 1, py0 - 13, px0 + 1, py0, PAL.woodDark);
     }
-    return;
+    pb.line(pC.w[0], pC.w[1] - 4, pC.s[0], pC.s[1] - 10, PAL.woodShade);
+    pb.line(pC.s[0], pC.s[1] - 4, pC.e[0], pC.e[1] - 10, PAL.woodShade);
+    drawPxPrism(pb, cx, anchorY - 9, w, h, 4, '#9e7044', '#b88858', { inset: 0.06, cornice: false });
   }
 
-  // Register warm night ambient glow for lit buildings
-  if (lit && nightAmount > 0.15) {
-    lightsOut.push({
-      x: cx,
-      y: baseY - 14,
-      r: (b.w + b.h) * 14,
-      color: '255, 206, 110',
-      alpha: nightAmount * 0.24,
-    });
+  // Under Construction Pixel Timber Scaffolding!
+  if (underConstruction) {
+    drawPxPrism(pb, cx, baseY, w, h, 8, '#c2ad88', '#d9c8a4', { inset: 0.08, cornice: false });
+    const sc = pxFootprint(cx, baseY - 8, w, h, 0.14);
+    for (const pt of [sc.n, sc.e, sc.s, sc.w]) {
+      pb.rect(pt[0] - 1, pt[1] - 20, 2, 20, PAL.woodLit);
+    }
+    pb.line(sc.w[0], sc.w[1] - 10, sc.s[0], sc.s[1] - 10, PAL.woodHi);
+    pb.line(sc.s[0], sc.s[1] - 10, sc.e[0], sc.e[1] - 10, PAL.woodLit);
+    pb.line(sc.w[0], sc.w[1] - 19, sc.s[0], sc.s[1] - 19, PAL.goldLit);
+    pb.line(sc.s[0], sc.s[1] - 19, sc.e[0], sc.e[1] - 19, PAL.goldMid);
+    pb.applyOutline(PAL.outline);
+    const sp = pb.toSprite(anchorX, anchorY);
+    buildingCache.set(key, sp);
+    return sp;
   }
 
-  const win = (rows: number, cols: number) => ({ rows, cols, lit, night: nightAmount });
+  const stucco = '#f0dcb4';
+  const warmStone = '#f5e7c6';
+  const terra = '#d95e38';
+  const darkTerra = '#b5432a';
+  const spec = CATALOG[type];
 
-  switch (b.type) {
+  switch (type) {
     case 'founders_hall': {
-      // 1920s Italian Renaissance Revival Centerpiece!
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 28, '#ede3ce', '#d8ccb2', {
-        windows: win(2, 4),
-        eaveShadow: true,
+      drawPxPrism(pb, cx, baseY, w, h, 26, stucco, '#c8603a', {
+        windows: true,
+        arches: true,
+        nightLit,
       });
-      drawIsoHippedRoof(ctx, cx, baseY - 28, b.w, b.h, 19, '#c2543a');
-      // Central Golden Cupola
-      drawIsoPrism(ctx, cx, baseY - 43, 0.85, 0.85, 11, '#dfd5be', '#eee6d4', { inset: 0.02 });
-      drawIsoDome(ctx, cx, baseY - 54, 11, 10, '#f5b700');
-      // Purple & Gold front banners
-      const c = footprintCorners(cx, baseY, b.w, b.h, 0.08);
-      drawPoly(
-        ctx,
-        [
-          [c.s[0] - 12, c.s[1] - 16],
-          [c.s[0] - 7, c.s[1] - 18],
-          [c.s[0] - 7, c.s[1] - 4],
-          [c.s[0] - 12, c.s[1] - 2],
-        ],
-        '#461d7c',
-      );
-      drawPoly(
-        ctx,
-        [
-          [c.s[0] + 7, c.s[1] - 18],
-          [c.s[0] + 12, c.s[1] - 16],
-          [c.s[0] + 12, c.s[1] - 2],
-          [c.s[0] + 7, c.s[1] - 4],
-        ],
-        '#f5b700',
-      );
+      drawPxHippedRoof(pb, cx, baseY - 26, w, h, 16, terra, 0.01);
+      drawPxPrism(pb, cx, baseY - 2, w * 0.44, h * 0.88, 29, warmStone, terra, {
+        windows: true,
+        arches: true,
+        nightLit,
+      });
+      drawPxHippedRoof(pb, cx, baseY - 31, w * 0.48, h * 0.90, 12, '#e66c42', 0.0);
+      pb.rect(cx - 2, baseY - 46, 5, 5, PAL.stuccoHi);
+      pb.line(cx, baseY - 56, cx, baseY - 46, PAL.goldHi);
+      pb.rect(cx + 1, baseY - 55, 6, 4, PAL.purpleLit);
+      pb.hline(cx + 1, cx + 6, baseY - 53, PAL.goldHi);
       break;
     }
 
     case 'bell_tower': {
-      // Iconic 175-ft LSU Memorial Campanile!
-      drawIsoPrism(ctx, cx, baseY, 1.5, 1.5, 12, '#d8ceb8', '#eae2d0');
-      drawIsoPrism(ctx, cx, baseY - 12, 0.92, 0.92, 68, '#ebe2ce', '#d8ceb8', { inset: 0.04 });
-      // Golden clock medallions
-      ctx.fillStyle = '#f5b700';
-      ctx.beginPath();
-      ctx.arc(cx - 8, baseY - 64, 4.5, 0, Math.PI * 2);
-      ctx.arc(cx + 8, baseY - 64, 4.5, 0, Math.PI * 2);
-      ctx.fill();
-      // Glowing arched belfry!
-      drawIsoPrism(ctx, cx, baseY - 80, 0.96, 0.96, 16, lit ? '#ffdf85' : '#8a7e6e', '#d8ceb8', { inset: 0.04 });
-      drawIsoHippedRoof(ctx, cx, baseY - 96, 1.05, 1.05, 18, '#c2543a');
-      ctx.fillStyle = '#f5b700';
-      ctx.beginPath();
-      ctx.arc(cx, baseY - 115, 3, 0, Math.PI * 2);
-      ctx.fill();
-      if (lit && nightAmount > 0.1) {
-        lightsOut.push({ x: cx, y: baseY - 88, r: 78, color: '255, 214, 110', alpha: nightAmount * 0.55 });
+      drawPxPrism(pb, cx, baseY, 1.38, 1.38, 7, '#e2d2b0', '#f0e2c2', { inset: 0.02 });
+      drawPxPrism(pb, cx, baseY - 7, 0.78, 0.78, 54, warmStone, '#e8d8b6', { inset: 0.04, cornice: true });
+      for (const ox of [-7, -3, 3, 7]) {
+        pb.line(cx + ox, baseY - 55, cx + ox, baseY - 14, ox < 0 ? PAL.stuccoMid : PAL.stuccoDark);
+      }
+      // Twin outlined golden clock faces on SW and SE upper faces!
+      pb.fillEllipse(cx - 6, baseY - 48, 5, 6, PAL.outline);
+      pb.fillEllipse(cx - 6, baseY - 48, 4, 5, PAL.goldHi);
+      pb.line(cx - 6, baseY - 48, cx - 6, baseY - 51, PAL.outline);
+      pb.line(cx - 6, baseY - 48, cx - 4, baseY - 48, PAL.outline);
+      pb.fillEllipse(cx + 6, baseY - 48, 5, 6, PAL.outline);
+      pb.fillEllipse(cx + 6, baseY - 48, 4, 5, PAL.stuccoLit);
+      pb.line(cx + 6, baseY - 48, cx + 6, baseY - 51, PAL.outline);
+      // Open arched belfry gallery
+      drawPxPrism(pb, cx, baseY - 61, 0.72, 0.72, 13, '#f7eccf', '#d95e38', { inset: 0.04 });
+      pb.rect(cx - 8, baseY - 71, 4, 7, nightLit ? PAL.winNight : PAL.archDark);
+      pb.rect(cx - 2, baseY - 70, 3, 7, nightLit ? PAL.winNight : PAL.archDark);
+      pb.rect(cx + 4, baseY - 71, 4, 7, nightLit ? PAL.winNight : PAL.archDark);
+      // Ribbed pyramidal terracotta spire!
+      const spTop: [number, number] = [cx, baseY - 96];
+      const spC = pxFootprint(cx, baseY - 74, 0.84, 0.84, 0.0);
+      pb.fillPoly([spC.w, spC.s, spTop], (x, y) => ((x + y) % 3 === 0 ? PAL.terraHi : PAL.terraLit));
+      pb.fillPoly([spC.s, spC.e, spTop], (x, y) => ((x - y) % 3 === 0 ? PAL.terraShade : PAL.terraMid));
+      pb.line(spC.s[0], spC.s[1], spTop[0], spTop[1], PAL.terraDark);
+      pb.line(cx, baseY - 103, cx, baseY - 96, PAL.goldHi);
+      // Flanking cypress shrubs!
+      for (const sx of [-14, 14]) {
+        pb.fillEllipse(cx + sx, baseY - 6, 3, 7, PAL.grassShade);
+        pb.fillEllipse(cx + sx - 1, baseY - 8, 2, 5, PAL.grassLit);
       }
       break;
     }
 
     case 'library': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 32, '#ede3ce', '#d8ccb2', {
-        windows: win(2, 5),
-        eaveShadow: true,
+      const bh = tier >= 2 ? 32 : tier === 1 ? 26 : 20;
+      drawPxPrism(pb, cx, baseY, w, h, bh, warmStone, terra, {
+        windows: true,
+        arches: true,
+        nightLit,
       });
-      drawIsoHippedRoof(ctx, cx, baseY - 32, b.w, b.h, 20, '#c2543a');
-      if (b.tier >= 1) {
-        // Tier 1: Flagship Research Library with Glowing Gold & Glass Reading Rotunda!
-        drawIsoPrism(ctx, cx, baseY - 46, 1.35, 1.35, 14, lit ? '#ffe294' : '#4a5c72', '#f5b700', { inset: 0.05 });
-        drawIsoDome(ctx, cx, baseY - 60, 22, 18, '#f5b700');
-        if (lit && nightAmount > 0.1) {
-          lightsOut.push({ x: cx, y: baseY - 54, r: 65, color: '255, 220, 120', alpha: nightAmount * 0.4 });
-        }
-      } else {
-        drawIsoPrism(ctx, cx, baseY - 48, 1.4, 1.1, 8, lit ? '#f8dc8c' : '#4a5c72', '#ded5c0');
+      drawPxHippedRoof(pb, cx, baseY - bh, w, h, 12, terra, 0.02);
+      if (tier >= 1) {
+        drawPxPrism(pb, cx, baseY - bh - 3, w * 0.50, h * 0.50, 12, warmStone, '#e8d7b2', {
+          windows: true,
+          nightLit,
+          inset: 0.04,
+        });
+        drawPxDome(
+          pb,
+          cx,
+          baseY - bh - 15,
+          tier >= 2 ? 23 : 18,
+          tier >= 2 ? 19 : 14,
+          tier >= 2 ? '#f7c21b' : '#e6a825',
+          true,
+        );
+      }
+      break;
+    }
+
+    case 'lecture_hall':
+    case 'engineering':
+    case 'coastal_institute':
+    case 'business_college':
+    case 'humanities_college':
+    case 'law_center':
+    case 'music_college':
+    case 'art_college':
+    case 'education_college':
+    case 'honors_college':
+    case 'rotc_armory':
+    case 'health_center':
+    case 'wildlife_post': {
+      const roofMap: Partial<Record<BuildingId, string>> = {
+        engineering: '#5e768f',
+        coastal_institute: '#32828a',
+        business_college: '#6d5e94',
+        law_center: '#8c3b36',
+        music_college: '#a34474',
+        art_college: '#c45e78',
+        honors_college: '#c98e26',
+        rotc_armory: '#5e6b54',
+        health_center: '#2e8c78',
+        wildlife_post: '#4c7a3e',
+      };
+      const wallMap: Partial<Record<BuildingId, string>> = {
+        engineering: '#e4dfd0',
+        business_college: '#e8e2d8',
+        health_center: '#eef4f0',
+      };
+      const rHex = roofMap[type] ?? terra;
+      const wHex = wallMap[type] ?? stucco;
+      const bh = type === 'business_college' || type === 'law_center' || type === 'engineering' ? 25 : 21;
+      drawPxPrism(pb, cx, baseY, w, h, bh, wHex, rHex, {
+        windows: true,
+        arches: type === 'law_center' || type === 'honors_college' || type === 'humanities_college' || type === 'lecture_hall',
+        nightLit,
+        brickTex: type === 'education_college' || type === 'rotc_armory',
+      });
+      drawPxHippedRoof(pb, cx, baseY - bh, w, h, 13, rHex, 0.01);
+
+      if (type === 'coastal_institute') {
+        drawPxPrism(pb, cx, baseY - bh - 6, 0.9, 0.7, 7, '#58c8d8', '#8cf0f5', { inset: 0.05 });
+      } else if (type === 'law_center' || type === 'honors_college') {
+        drawPxDome(pb, cx, baseY - bh - 12, 11, 9, type === 'honors_college' ? '#f7c21b' : '#c9bca2', true);
+      } else if (type === 'health_center') {
+        pb.rect(cx - 2, baseY - bh - 11, 5, 11, PAL.stuccoHi);
+        pb.rect(cx - 5, baseY - bh - 8, 11, 5, PAL.stuccoHi);
+        pb.rect(cx - 1, baseY - bh - 10, 3, 9, hexToRGBA('#d93838'));
+        pb.rect(cx - 4, baseY - bh - 7, 9, 3, hexToRGBA('#d93838'));
       }
       break;
     }
 
     case 'science_college': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 30, '#e3dac6', '#d6cbb4', {
-        windows: win(2, 4),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 30, b.w, b.h, 16, '#b84c35');
-      // Gleaming Silver Astronomical Observatory Dome!
-      drawIsoPrism(ctx, cx + 14, baseY - 40, 1.0, 1.0, 11, '#d8d0bc', '#c8c0ac', { inset: 0.05 });
-      drawIsoDome(ctx, cx + 14, baseY - 51, 16, 15, '#ced8e2');
-      ctx.strokeStyle = '#2c3440';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(cx + 14, baseY - 65);
-      ctx.lineTo(cx + 21, baseY - 53);
-      ctx.stroke();
+      drawPxPrism(pb, cx, baseY, w, h, 24, '#e6e8ec', '#4b688a', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 24, w, h, 11, '#4b688a', 0.02);
+      // Astronomical Observatory Dome with telescope slit!
+      drawPxDome(pb, cx + 4, baseY - 32, 14, 12, '#f5f2e8', false);
+      pb.rect(cx + 2, baseY - 43, 4, 10, PAL.archDark);
+      pb.line(cx + 4, baseY - 40, cx + 10, baseY - 46, PAL.stoneMid);
       break;
     }
 
     case 'ag_college': {
-      drawIsoPrism(ctx, cx - 14, baseY - 4, b.w * 0.58, b.h * 0.9, 26, '#ece2cd', '#d8ccb2', {
-        windows: win(2, 3),
-        eaveShadow: true,
+      drawPxPrism(pb, cx - 12, baseY + 5, w * 0.56, h * 0.85, 18, '#cf6f4a', darkTerra, {
+        windows: true,
+        nightLit,
+        brickTex: true,
       });
-      drawIsoHippedRoof(ctx, cx - 14, baseY - 30, b.w * 0.62, b.h * 0.94, 15, '#c2543a');
-      // Sunlit Translucent Glass Greenhouses!
-      drawIsoPrism(ctx, cx + 22, baseY + 8, b.w * 0.42, b.h * 0.78, 13, '#9bd8df', '#c6f0f5', { inset: 0.08 });
-      drawIsoDome(ctx, cx + 22, baseY - 5, 18, 10, '#bfeaf0');
-      break;
-    }
-
-    case 'business_college': {
-      drawIsoPrism(ctx, cx - 10, baseY - 3, b.w * 0.62, b.h * 0.92, 30, '#ede3ce', '#d8ccb2', {
-        windows: win(2, 4),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx - 10, baseY - 33, b.w * 0.66, b.h * 0.96, 16, '#c2543a');
-      // Classical Rotunda Wing
-      drawIsoPrism(ctx, cx + 24, baseY + 6, 1.4, 1.4, 30, '#dfd6c1', '#c8c0ac');
-      drawIsoDome(ctx, cx + 24, baseY - 24, 21, 13, '#c2543a');
-      break;
-    }
-
-    case 'engineering': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 34, '#e6ddca', '#d8ccb2', {
-        windows: win(3, 5),
-        eaveShadow: true,
-      });
-      // Modern glass skybridge stripe
-      drawIsoPrism(ctx, cx, baseY - 12, 1.2, b.h * 0.6, 12, lit ? '#ffdf88' : '#4a627a', '#6a829a', { inset: 0.05 });
-      drawIsoHippedRoof(ctx, cx, baseY - 34, b.w, b.h, 16, '#bd5038');
-      break;
-    }
-
-    case 'coastal_institute': {
-      // Timber & Glass Bayou Pavilion on Stilts + Weather Radar Dome
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 22, '#6d8d99', '#5a636d', {
-        windows: win(1, 4),
-        inset: 0.14,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 22, b.w, b.h, 13, '#4c5661');
-      ctx.strokeStyle = '#8b95a1';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx + 12, baseY - 30);
-      ctx.lineTo(cx + 12, baseY - 46);
-      ctx.stroke();
-      drawIsoDome(ctx, cx + 12, baseY - 46, 5, 5, '#ece8dc');
-      break;
-    }
-
-    case 'law_center': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 36, '#e2dac6', '#d4cab0', {
-        windows: win(2, 5),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 36, b.w, b.h, 18, '#b84c35');
+      drawPxHippedRoof(pb, cx - 12, baseY - 13, w * 0.56, h * 0.85, 10, darkTerra, 0.02);
+      drawPxPrism(pb, cx + 14, baseY - 5, w * 0.44, h * 0.78, 14, '#8ee8db', '#baf7ed', { inset: 0.05 });
+      drawPxHippedRoof(pb, cx + 14, baseY - 19, w * 0.44, h * 0.78, 8, '#66d4c4', 0.03);
       break;
     }
 
     case 'vet_school': {
-      drawIsoPrism(ctx, cx - 18, baseY - 6, b.w * 0.56, b.h * 0.88, 28, '#ebe2ce', '#d8ccb2', {
-        windows: win(2, 4),
-        eaveShadow: true,
+      drawPxPrism(pb, cx, baseY, w, h, 20, '#c7523a', '#6b2822', {
+        windows: true,
+        nightLit,
+        brickTex: true,
       });
-      drawIsoHippedRoof(ctx, cx - 18, baseY - 34, b.w * 0.6, b.h * 0.92, 16, '#c2543a');
-      // Red Teaching Barn & Paddock
-      drawIsoPrism(ctx, cx + 26, baseY + 6, b.w * 0.4, b.h * 0.48, 20, '#a43e32', '#525862');
-      drawIsoHippedRoof(ctx, cx + 26, baseY - 14, b.w * 0.44, b.h * 0.52, 14, '#4b515c');
+      drawPxHippedRoof(pb, cx, baseY - 20, w, h, 14, '#5c4b47', 0.01);
+      pb.rect(cx - 12, baseY - 9, 8, 9, PAL.stuccoHi);
+      pb.rect(cx - 11, baseY - 8, 6, 7, hexToRGBA('#a83a28'));
+      pb.line(cx - 11, baseY - 8, cx - 6, baseY - 2, PAL.stuccoHi);
+      pb.line(cx - 6, baseY - 8, cx - 11, baseY - 2, PAL.stuccoHi);
       break;
     }
 
     case 'masscomm_school': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 26, '#ebe2ce', '#d8ccb2', {
-        windows: win(2, 3),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 26, b.w, b.h, 14, '#c2543a');
-      // Tall Broadcast Spire with Blinking Red Beacon
-      ctx.strokeStyle = '#7c8794';
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.moveTo(cx + 8, baseY - 35);
-      ctx.lineTo(cx + 8, baseY - 82);
-      ctx.stroke();
-      const blink = Math.sin(elapsed * 4.5) > -0.2;
-      if (blink) {
-        ctx.fillStyle = '#ff3838';
-        ctx.beginPath();
-        ctx.arc(cx + 8, baseY - 84, 3.2, 0, Math.PI * 2);
-        ctx.fill();
-        lightsOut.push({ x: cx + 8, y: baseY - 84, r: 22, color: '255, 50, 50', alpha: 0.55 });
+      drawPxPrism(pb, cx, baseY, w, h, 22, '#e2ded2', '#4c596b', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 22, w, h, 9, '#4c596b', 0.03);
+      for (let sy = 0; sy < 34; sy += 6) {
+        const col = (sy / 6) % 2 === 0 ? hexToRGBA('#e83838') : PAL.stuccoHi;
+        pb.rect(cx - 1, baseY - 31 - sy - 6, 3, 6, col);
       }
+      pb.rect(cx - 2, baseY - 68, 5, 3, hexToRGBA('#ff3b4e'));
       break;
     }
 
-    case 'rotc_armory': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 28, '#96483d', '#c8bfa8', {
-        windows: win(2, 4),
-        eaveShadow: true,
-      });
-      drawIsoDome(ctx, cx, baseY - 28, b.w * 15, 16, '#4d545e');
-      break;
-    }
-
-    case 'dorm': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 30, '#ebe1cc', '#d8ccb2', {
-        windows: win(3, 4),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 30, b.w, b.h, 15, '#c2543a');
-      break;
-    }
-
+    case 'dorm':
     case 'res_tower': {
-      // Towering 9-story Residence Hall glowing like a jewel box at night!
-      drawIsoPrism(ctx, cx, baseY, b.w * 0.84, b.h * 0.84, 78, '#ede3ce', '#d8ccb2', {
-        windows: win(7, 4),
-        eaveShadow: true,
+      const baseH = type === 'res_tower' ? 42 : 20;
+      const bh = baseH + tier * 10;
+      drawPxPrism(pb, cx, baseY, w, h, bh, '#db9f76', darkTerra, {
+        windows: true,
+        arches: tier >= 1 || type === 'res_tower',
+        nightLit,
+        brickTex: true,
       });
-      drawIsoHippedRoof(ctx, cx, baseY - 78, b.w * 0.88, b.h * 0.88, 16, '#c2543a');
+      drawPxHippedRoof(pb, cx, baseY - bh, w, h, 12, darkTerra, 0.01);
       break;
     }
 
-    case 'dining_hall': {
-      const h = b.tier === 0 ? 22 : b.tier === 1 ? 28 : 34;
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, h, '#ede3ce', '#d8ccb2', {
-        windows: win(1 + b.tier, 4),
-        eaveShadow: true,
+    case 'dining_hall':
+    case 'poboy':
+    case 'campus_store': {
+      const bh = type === 'dining_hall' ? 19 + tier * 5 : 16;
+      const wallC = type === 'poboy' ? '#f5d2a4' : type === 'campus_store' ? '#ede4f5' : '#f2d9aa';
+      const roofC = type === 'campus_store' ? '#6128a8' : '#d96338';
+      drawPxPrism(pb, cx, baseY, w, h, bh, wallC, roofC, {
+        windows: true,
+        arches: type === 'dining_hall',
+        nightLit,
       });
-      drawIsoHippedRoof(ctx, cx, baseY - h, b.w, b.h, 15, '#c2543a');
-      // Purple & gold outdoor umbrellas!
-      const c = footprintCorners(cx, baseY, b.w, b.h, 0.04);
-      for (let u = 0; u < 3; u++) {
-        const ux = c.s[0] - 18 + u * 16;
-        const uy = c.s[1] - 4 + (u % 2) * 3;
-        drawIsoDome(ctx, ux, uy - 5, 6, 4, u === 1 ? '#f5b700' : '#461d7c');
+      drawPxHippedRoof(pb, cx, baseY - bh, w, h, 10, roofC, 0.01);
+      for (let k = -8; k <= 8; k += 4) {
+        pb.rect(cx - 12 + k, baseY - 6 + Math.round(k * 0.4), 3, 4, (k / 4) % 2 === 0 ? PAL.purpleLit : PAL.goldLit);
       }
       break;
     }
 
     case 'union': {
-      const h = b.tier >= 1 ? 36 : 28;
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, h, '#ede3ce', '#d8ccb2', {
-        windows: win(2, 5),
-        eaveShadow: true,
+      const bh = tier >= 1 ? 28 : 22;
+      drawPxPrism(pb, cx, baseY, w, h, bh, warmStone, '#461d7c', {
+        windows: true,
+        arches: true,
+        nightLit,
       });
-      drawIsoHippedRoof(ctx, cx, baseY - h, b.w, b.h, 17, '#c2543a');
-      if (b.tier >= 1) drawIsoDome(ctx, cx, baseY - h - 12, 14, 11, '#f5b700');
-      // Purple & gold entrance awning
-      drawIsoPrism(ctx, cx - 10, baseY + 12, 1.8, 0.45, 4, '#461d7c', '#f5b700', { inset: 0.02 });
+      drawPxHippedRoof(pb, cx, baseY - bh, w, h, 12, '#6934ad', 0.02);
+      drawPxPrism(pb, cx, baseY - bh - 5, w * 0.38, h * 0.38, 8, '#f7c21b', '#ffe066', { inset: 0.05 });
       break;
     }
 
     case 'rec_center': {
-      drawIsoPrism(ctx, cx - 14, baseY - 4, b.w * 0.56, b.h * 0.9, 26, '#ece2ce', '#d8ccb2', {
-        windows: win(2, 3),
-        eaveShadow: true,
+      drawPxPrism(pb, cx - 10, baseY - 4, w * 0.60, h * 0.90, 20, '#e8e4da', '#2e88b5', {
+        windows: true,
+        nightLit,
       });
-      drawIsoHippedRoof(ctx, cx - 14, baseY - 30, b.w * 0.6, b.h * 0.94, 14, '#c2543a');
-      // Sparkling Outdoor Turquoise Lagoon Pool!
-      const pc = footprintCorners(cx + 22, baseY + 8, b.w * 0.4, b.h * 0.78, 0.08);
-      drawPoly(ctx, [pc.n, pc.e, pc.s, pc.w], '#d8d0be');
-      const pool = footprintCorners(cx + 22, baseY + 8, b.w * 0.32, b.h * 0.66, 0.08);
-      drawPoly(ctx, [pool.n, pool.e, pool.s, pool.w], '#29a8ba');
+      drawPxHippedRoof(pb, cx - 10, baseY - 24, w * 0.60, h * 0.90, 9, '#2e88b5', 0.02);
+      const pDeck = pxFootprint(cx + 16, baseY + 6, w * 0.42, h * 0.72, 0.04);
+      pb.fillPoly([pDeck.n, pDeck.e, pDeck.s, pDeck.w], PAL.stoneHi);
+      const pWat = pxFootprint(cx + 16, baseY + 6, w * 0.34, h * 0.58, 0.06);
+      pb.fillPoly([pWat.n, pWat.e, pWat.s, pWat.w], (x, y) => ((x + y) % 5 === 0 ? PAL.waterSpark : PAL.waterHi));
       break;
     }
 
     case 'parking': {
-      if (b.tier === 0) {
-        const pc = footprintCorners(cx, baseY, b.w, b.h, 0.06);
-        drawPoly(ctx, [pc.n, pc.e, pc.s, pc.w], '#454a54', '#d8d0be', 1.2);
-        // Cute parked cars
-        const cols = ['#461d7c', '#f5b700', '#e8e2d4', '#c2543a'];
-        for (let k = 0; k < 4; k++) {
-          drawIsoPrism(ctx, cx - 22 + k * 14, baseY - 2 + (k % 2) * 8, 0.42, 0.28, 5, cols[k], cols[k], { inset: 0.01 });
-        }
-      } else {
-        // 3-Story Concrete Garage or 5-Story Parking Tower!
-        const floors = b.tier === 1 ? 3 : 5;
-        for (let f = 0; f < floors; f++) {
-          drawIsoPrism(ctx, cx, baseY - f * 9, b.w * 0.94, b.h * 0.92, 6, '#b8b3a8', '#cfc9be', { inset: 0.06 });
-        }
+      const floors = tier >= 2 ? 4 : tier === 1 ? 3 : 2;
+      const bh = floors * 10;
+      drawPxPrism(pb, cx, baseY, w, h, bh, '#c4bfb4', '#9e9b95', { inset: 0.06 });
+      const bot = pxFootprint(cx, baseY, w, h, 0.06);
+      for (let fl = 1; fl <= floors; fl++) {
+        const dy = fl * 10 - 4;
+        pb.line(bot.w[0] + 2, bot.w[1] - dy, bot.s[0] - 2, bot.s[1] - dy, PAL.archDark);
+        pb.line(bot.w[0] + 2, bot.w[1] - dy - 1, bot.s[0] - 2, bot.s[1] - dy - 1, PAL.archDark);
+        pb.line(bot.s[0] + 2, bot.s[1] - dy, bot.e[0] - 2, bot.e[1] - dy, PAL.archDark);
       }
-      break;
-    }
-
-    case 'poboy':
-    case 'campus_store': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 18, '#ede3ce', '#461d7c', {
-        windows: win(1, 2),
-      });
-      drawIsoPrism(ctx, cx, baseY - 18, b.w + 0.06, b.h + 0.06, 4, '#461d7c', '#f5b700', { inset: 0.04 });
-      break;
-    }
-
-    case 'concert_hall': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 30, '#e2dac6', '#d0c8b4', { windows: win(2, 5) });
-      drawIsoDome(ctx, cx, baseY - 30, b.w * 16, 20, '#d0d8e0');
-      break;
-    }
-
-    case 'nat_museum': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 28, '#e3dac6', '#d4cab0', { windows: win(2, 4), eaveShadow: true });
-      drawIsoHippedRoof(ctx, cx, baseY - 28, b.w, b.h, 16, '#c2543a');
-      drawIsoDome(ctx, cx, baseY + 12, 6, 6, '#f5b700');
-      break;
-    }
-
-    case 'tiger_statue': {
-      drawIsoPrism(ctx, cx, baseY, 0.72, 0.72, 8, '#d8ceb8', '#eae2d0', { inset: 0.05 });
-      drawIsoPrism(ctx, cx, baseY - 8, 0.45, 0.24, 7, '#a87234', '#c99044', { inset: 0.02 });
       break;
     }
 
     case 'substation': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 5, '#a8a49c', '#c2beb5');
-      drawIsoPrism(ctx, cx - 10, baseY - 5, 0.65, 0.65, 14, '#5c6670', '#7c8794');
-      drawIsoPrism(ctx, cx + 10, baseY - 5, 0.65, 0.65, 14, '#5c6670', '#7c8794');
-      // Glowing green or red blackout status beacon!
-      ctx.fillStyle = b.flooded ? '#ff2a3c' : '#28e07c';
-      ctx.beginPath();
-      ctx.arc(cx, baseY - 24, 4.5, 0, Math.PI * 2);
-      ctx.fill();
-      lightsOut.push({
-        x: cx,
-        y: baseY - 24,
-        r: 24,
-        color: b.flooded ? '255, 40, 50' : '40, 230, 120',
-        alpha: 0.45,
-      });
+      drawPxPrism(pb, cx, baseY, w, h, 10, '#8f98a3', '#a6afb8', { inset: 0.10 });
+      drawPxPrism(pb, cx - 7, baseY - 10, 0.36, 0.36, 12, '#626d78', '#7e8994', { inset: 0.02 });
+      drawPxPrism(pb, cx + 7, baseY - 10, 0.36, 0.36, 12, '#626d78', '#7e8994', { inset: 0.02 });
+      pb.rect(cx - 2, baseY - 25, 5, 5, flooded ? hexToRGBA('#ff3842') : hexToRGBA('#36e885'));
       break;
     }
 
     case 'water_tower': {
-      // Tall steel legs + Iconic Purple & Gold LSU Water Tower!
-      ctx.strokeStyle = '#5a6470';
-      ctx.lineWidth = 2.6;
-      for (const ox of [-11, 0, 11]) {
-        ctx.beginPath();
-        ctx.moveTo(cx + ox, baseY);
-        ctx.lineTo(cx + ox * 0.7, baseY - 38);
-        ctx.stroke();
+      for (const ox of [-10, 0, 10]) {
+        pb.line(cx + ox, baseY, cx + Math.round(ox * 0.65), baseY - 34, PAL.roadShade);
+        pb.line(cx + ox + 1, baseY, cx + Math.round(ox * 0.65) + 1, baseY - 34, PAL.roadHi);
       }
-      drawIsoPrism(ctx, cx, baseY - 36, 1.15, 1.15, 22, '#461d7c', '#5e2ca5', { inset: 0.08 });
-      drawIsoPrism(ctx, cx, baseY - 43, 1.19, 1.19, 5, '#f5b700', '#f5b700', { inset: 0.08 });
-      drawIsoDome(ctx, cx, baseY - 58, 22, 11, '#ded7c6');
+      pb.line(cx - 9, baseY - 10, cx + 8, baseY - 22, PAL.roadHi);
+      pb.line(cx + 9, baseY - 10, cx - 8, baseY - 22, PAL.roadHi);
+      drawPxPrism(pb, cx, baseY - 32, 1.12, 1.12, 22, '#5e2ca5', '#7838c8', { inset: 0.08 });
+      drawPxPrism(pb, cx, baseY - 40, 1.15, 1.15, 5, '#f7c21b', '#ffe066', { inset: 0.08, cornice: false });
+      drawPxDome(pb, cx, baseY - 54, 21, 11, '#e8e0cc', true);
       break;
     }
 
     case 'generator': {
-      drawIsoPrism(ctx, cx, baseY, 0.85, 0.72, 12, '#e89d24', '#f5b700');
+      drawPxPrism(pb, cx, baseY, 0.85, 0.72, 12, '#e69b24', '#f7c21b', { inset: 0.08 });
+      pb.rect(cx - 4, baseY - 9, 4, 4, PAL.archDark);
+      pb.line(cx + 5, baseY - 12, cx + 5, baseY - 19, PAL.roadShade);
       break;
     }
 
     case 'pump': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 18, '#9fa6ae', '#b8bfc7', { eaveShadow: true });
-      drawIsoHippedRoof(ctx, cx, baseY - 18, b.w, b.h, 10, '#4c5460');
+      drawPxPrism(pb, cx, baseY, w, h, 18, '#9aa4b0', '#b5bec9', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 18, w, h, 10, '#495463', 0.02);
+      pb.rect(cx - 12, baseY - 12, 4, 12, PAL.waterMid);
+      pb.rect(cx + 8, baseY - 12, 4, 12, PAL.waterDeep);
       break;
     }
 
     case 'pond': {
-      const rim = footprintCorners(cx, baseY, b.w, b.h, 0.06);
-      drawPoly(ctx, [rim.n, rim.e, rim.s, rim.w], '#c4bba4');
-      const wat = footprintCorners(cx, baseY, b.w, b.h, 0.22);
-      drawPoly(ctx, [wat.n, wat.e, wat.s, wat.w], '#2b8896');
+      const rim = pxFootprint(cx, baseY, w, h, 0.04);
+      pb.fillPoly([rim.n, rim.e, rim.s, rim.w], (x, y) => (bayer4(x, y) > 0.5 ? PAL.stoneMid : PAL.grassShade));
+      const wat = pxFootprint(cx, baseY, w, h, 0.22);
+      pb.fillPoly([wat.n, wat.e, wat.s, wat.w], (x, y) => (bayer4(x, y) > 0.65 ? PAL.waterHi : PAL.waterMid));
+      pb.fillEllipse(cx - 6, baseY - 2, 4, 2, PAL.grassHi);
+      pb.fillEllipse(cx + 7, baseY + 3, 3, 2, PAL.grassLit);
+      pb.px(cx - 6, baseY - 3, PAL.azaleaHi);
       break;
     }
 
     case 'abatement': {
-      drawIsoPrism(ctx, cx, baseY, 0.9, 0.85, 14, '#eaf0f4', '#389cb5');
+      drawPxPrism(pb, cx, baseY, 0.92, 0.85, 14, '#e6f0f2', '#349db8', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 14, 0.92, 0.85, 6, '#349db8', 0.04);
       break;
     }
 
     case 'bat_house': {
-      ctx.strokeStyle = '#6e4e32';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(cx, baseY);
-      ctx.lineTo(cx, baseY - 26);
-      ctx.stroke();
-      drawIsoPrism(ctx, cx, baseY - 24, 0.52, 0.52, 9, '#ebe2ce', '#c2543a');
-      break;
-    }
-
-    case 'wildlife_post': {
-      drawIsoPrism(ctx, cx, baseY, 0.9, 0.9, 14, '#8c623d', '#5d843c', { windows: win(1, 2) });
-      drawIsoHippedRoof(ctx, cx, baseY - 14, 1.0, 1.0, 10, '#497336');
-      break;
-    }
-
-    case 'health_center': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 24, '#f0eae0', '#d8ccb2', { windows: win(2, 3), eaveShadow: true });
-      drawIsoHippedRoof(ctx, cx, baseY - 24, b.w, b.h, 13, '#c2543a');
-      // Glowing green medical cross
-      ctx.fillStyle = '#20b872';
-      ctx.fillRect(cx - 6, baseY - 20, 12, 4);
-      ctx.fillRect(cx - 2, baseY - 24, 4, 12);
+      pb.rect(cx - 1, baseY - 25, 3, 25, PAL.woodShade);
+      drawPxPrism(pb, cx, baseY - 23, 0.54, 0.54, 10, '#e8dcc4', '#c7523a', { inset: 0.04 });
       break;
     }
 
     case 'surge_barrier': {
-      // FORTRESS CAPSTONE: Towering Concrete Towers & Steel Storm Sector Gates!
-      drawIsoPrism(ctx, cx - 28, baseY - 6, 0.95, 1.4, 52, '#a8afb8', '#c6cdd6');
-      drawIsoPrism(ctx, cx + 28, baseY + 6, 0.95, 1.4, 52, '#a8afb8', '#c6cdd6');
-      drawIsoPrism(ctx, cx, baseY, b.w * 0.65, 0.55, 32, '#5c6978', '#798796');
-      drawIsoPrism(ctx, cx, baseY - 46, b.w * 0.95, 0.7, 7, '#d8d0be', '#ebe4d4');
+      drawPxPrism(pb, cx - 26, baseY - 5, 0.95, 1.35, 52, '#a6aeb8', '#c8d0d9', { inset: 0.04 });
+      drawPxPrism(pb, cx + 26, baseY + 5, 0.95, 1.35, 52, '#a6aeb8', '#c8d0d9', { inset: 0.04 });
+      drawPxPrism(pb, cx, baseY, w * 0.65, 0.55, 30, '#5a6778', '#788696', { inset: 0.05 });
+      drawPxPrism(pb, cx, baseY - 45, w * 0.96, 0.68, 7, '#dcd4c0', '#efe8d6', { inset: 0.03 });
       break;
     }
 
     case 'rookery': {
-      // LIVING WITH WATER CAPSTONE: Cypress Marsh Observation Platform & Nesting Blind
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 5, '#8a623c', '#a3784e');
-      drawIsoPrism(ctx, cx - 10, baseY - 5, 1.1, 1.0, 14, '#7d5634', '#4a7538');
-      drawIsoHippedRoof(ctx, cx - 10, baseY - 19, 1.25, 1.15, 10, '#4b7838');
+      drawPxPrism(pb, cx, baseY, w, h, 5, '#8c623a', '#a87b4f', { inset: 0.04 });
+      drawPxPrism(pb, cx - 8, baseY - 5, 1.05, 1.0, 14, '#7d5432', '#4c7d3b', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx - 8, baseY - 19, 1.18, 1.12, 10, '#4c7d3b', 0.02);
       break;
     }
 
     case 'practice_field': {
-      thisField2D(ctx, cx, baseY, b.w, b.h);
-      if (b.tier >= 1) {
-        drawIsoPrism(ctx, cx - 26, baseY - 16, b.w * 0.8, 0.55, 12, '#a8a298', '#461d7c');
+      drawPxField(pb, cx, baseY, w, h);
+      if (tier >= 1) {
+        drawPxPrism(pb, cx - 24, baseY - 14, w * 0.72, 0.50, 11, '#b0aa9e', '#5e2ca5', { inset: 0.04 });
       }
       break;
     }
 
     case 'stadium': {
-      // THE CAULDRON — Showstopping 2D Isometric Football Cathedral!
-      const wallH = b.tier === 0 ? 22 : b.tier === 1 ? 36 : 48;
-      // Outer bowl shell
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, wallH, '#a49e96', '#461d7c', { inset: 0.04 });
-      // Recessed green football field drawn cleanly on top of the stadium bowl!
-      thisField2D(ctx, cx, baseY - wallH + 6, b.w * 0.7, b.h * 0.64);
-
-      // Stepped Purple & Gold Crowd Rim (animated wave during live games!)
-      const wave = state.football.active ? Math.sin(elapsed * 8) * 2.5 : 0;
-      const topC = footprintCorners(cx, baseY - wallH - wave, b.w * 0.92, b.h * 0.92, 0.04);
-      ctx.strokeStyle = '#f5b700';
-      ctx.lineWidth = 4.5;
-      ctx.beginPath();
-      ctx.moveTo(topC.w[0], topC.w[1]);
-      ctx.lineTo(topC.s[0], topC.s[1]);
-      ctx.lineTo(topC.e[0], topC.e[1]);
-      ctx.stroke();
-
-      ctx.strokeStyle = '#5e2ca5';
-      ctx.lineWidth = 4.5;
-      ctx.beginPath();
-      ctx.moveTo(topC.w[0], topC.w[1]);
-      ctx.lineTo(topC.n[0], topC.n[1]);
-      ctx.lineTo(topC.e[0], topC.e[1]);
-      ctx.stroke();
-
-      // Glowing Scoreboard
-      drawIsoPrism(ctx, topC.e[0] - 8, topC.e[1], 0.4, 1.5, 18, '#262a34', '#f5b700');
-
-      // Tier 1+: 6 Iconic Towering Stadium Light Masts!
-      if (b.tier >= 1) {
-        const gameNight = state.football.active && state.football.nightGame;
-        const mastPts: [number, number][] = [
-          [topC.n[0] - 18, topC.n[1] + 8],
-          [topC.n[0] + 18, topC.n[1] + 8],
-          [topC.w[0] + 12, topC.w[1] - 4],
-          [topC.e[0] - 12, topC.e[1] - 4],
-          [topC.s[0] - 24, topC.s[1] - 6],
-          [topC.s[0] + 24, topC.s[1] - 6],
+      const wallH = tier === 0 ? 22 : tier === 1 ? 34 : 44;
+      drawPxPrism(pb, cx, baseY, w, h, wallH, '#aba49c', '#4b1e85', {
+        inset: 0.04,
+        arches: true,
+        windows: tier >= 1,
+        nightLit,
+      });
+      drawPxField(pb, cx, baseY - wallH + 5, w * 0.70, h * 0.64);
+      const rim = pxFootprint(cx, baseY - wallH, w * 0.94, h * 0.94, 0.03);
+      for (let off = 0; off < 4; off++) {
+        const col = off % 2 === 0 ? PAL.goldLit : PAL.purpleLit;
+        pb.line(rim.w[0], rim.w[1] - off, rim.s[0], rim.s[1] - off, col);
+        pb.line(rim.s[0], rim.s[1] - off, rim.e[0], rim.e[1] - off, col);
+        pb.line(rim.w[0], rim.w[1] - off, rim.n[0], rim.n[1] - off, off % 2 === 0 ? PAL.purpleHi : PAL.goldHi);
+        pb.line(rim.n[0], rim.n[1] - off, rim.e[0], rim.e[1] - off, off % 2 === 0 ? PAL.purpleHi : PAL.goldHi);
+      }
+      drawPxPrism(pb, rim.e[0] - 8, rim.e[1] - 2, 0.38, 1.4, 17, '#262b38', '#f7c21b', { inset: 0.02 });
+      pb.rect(rim.e[0] - 13, rim.e[1] - 15, 9, 7, PAL.winNight);
+      if (tier >= 1) {
+        const masts: [number, number][] = [
+          [rim.n[0] - 18, rim.n[1] + 6],
+          [rim.n[0] + 18, rim.n[1] + 6],
+          [rim.w[0] + 12, rim.w[1] - 4],
+          [rim.e[0] - 12, rim.e[1] - 4],
+          [rim.s[0] - 22, rim.s[1] - 5],
+          [rim.s[0] + 22, rim.s[1] - 5],
         ];
-        for (const [mx, my] of mastPts) {
-          ctx.strokeStyle = '#525b66';
-          ctx.lineWidth = 2.6;
-          ctx.beginPath();
-          ctx.moveTo(mx, my);
-          ctx.lineTo(mx, my - 38);
-          ctx.stroke();
-          ctx.fillStyle = gameNight || nightAmount > 0.2 ? '#fff8d6' : '#dfe4ea';
-          ctx.fillRect(mx - 7, my - 43, 14, 6);
-          if (gameNight || nightAmount > 0.2) {
-            lightsOut.push({
-              x: mx,
-              y: my - 40,
-              r: gameNight ? 66 : 48,
-              color: '255, 240, 185',
-              alpha: gameNight ? 0.24 : nightAmount * 0.22,
-            });
-          }
-        }
-        if (gameNight) {
-          lightsOut.push({ x: cx, y: baseY - wallH, r: 120, color: '255, 236, 175', alpha: 0.16 });
+        for (const [mx, my] of masts) {
+          pb.rect(mx - 1, my - 34, 2, 34, PAL.roadShade);
+          pb.rect(mx - 6, my - 39, 13, 6, nightLit ? PAL.winNightCore : PAL.stoneHi);
+          pb.rect(mx - 5, my - 38, 11, 4, nightLit ? PAL.winNight : PAL.stuccoHi);
         }
       }
       break;
     }
 
     case 'arena': {
-      // THE ASSEMBLY — Iconic Circular Ribbed White-Concrete Dome Basketball Arena!
-      const rx = b.w * 14.5;
-      drawIsoDome(ctx, cx, baseY - 12, rx, rx * 0.48, '#ede6d6');
-      // Drum base + purple & gold fascia ring
-      ctx.fillStyle = '#461d7c';
-      ctx.beginPath();
-      ctx.ellipse(cx, baseY - 12, rx * 1.01, rx * 0.44, 0, 0, Math.PI);
-      ctx.fill();
-      ctx.strokeStyle = '#f5b700';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.ellipse(cx, baseY - 13, rx * 1.01, rx * 0.44, 0, 0, Math.PI);
-      ctx.stroke();
-      drawIsoDome(ctx, cx, baseY - 16, rx * 0.96, rx * 0.44, '#f0e9db');
+      const rx = Math.round(w * 14.5);
+      pb.fillEllipse(cx, baseY - 2, rx, Math.round(rx * 0.48), PAL.purpleLit);
+      pb.fillEllipse(cx, baseY - 6, rx, Math.round(rx * 0.46), PAL.goldLit);
+      drawPxDome(pb, cx, baseY - 12, rx, Math.round(rx * 0.56), '#ede6d4', false);
       break;
     }
 
     case 'tiger_habitat': {
-      // Roux's Lush Sanctuary with Rock Grotto, Lagoon Pool & Animated 2D Bengal Tiger!
-      const fc = footprintCorners(cx, baseY, b.w, b.h, 0.08);
-      drawPoly(ctx, [fc.n, fc.e, fc.s, fc.w], '#5a8f3d', '#cfc5b0', 3);
-      // Lagoon pool
-      ctx.fillStyle = '#2c96a4';
-      ctx.beginPath();
-      ctx.ellipse(cx + 14, baseY + 4, 18, 9, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Sandstone rock grotto
-      drawIsoDome(ctx, cx - 18, baseY - 4, 16, 12, '#c8bba0');
-      // Animated pacing Roux the Bengal Tiger!
-      const rx = cx + Math.cos(elapsed * 0.7) * 14;
-      const ry = baseY + Math.sin(elapsed * 0.7) * 6;
-      ctx.fillStyle = '#e87e22';
-      ctx.beginPath();
-      ctx.ellipse(rx, ry - 4, 7, 4, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#221a15';
-      ctx.fillRect(rx - 2, ry - 7, 2, 5);
-      ctx.fillRect(rx + 2, ry - 7, 2, 5);
-      break;
-    }
-
-    // ===== COLLEGE TOWN DISTRICT =====
-    case 'town_center': {
-      const fc = footprintCorners(cx, baseY, b.w, b.h, 0.05);
-      drawPoly(ctx, [fc.n, fc.e, fc.s, fc.w], '#dfd5c0', '#b8ae98', 1.5);
-      // Twin flanking brick College Town buildings
-      drawIsoPrism(ctx, cx - 28, baseY - 8, 1.25, b.h * 0.85, 28, '#9e4b3d', '#c2543a', { windows: win(2, 3) });
-      drawIsoHippedRoof(ctx, cx - 28, baseY - 36, 1.32, b.h * 0.9, 12, '#c2543a');
-      drawIsoPrism(ctx, cx + 28, baseY + 8, 1.25, b.h * 0.85, 28, '#9e4b3d', '#c2543a', { windows: win(2, 3) });
-      drawIsoHippedRoof(ctx, cx + 28, baseY - 20, 1.32, b.h * 0.9, 12, '#c2543a');
-      // Sparkling Central Limestone Fountain!
-      ctx.fillStyle = '#cfc5b0';
-      ctx.beginPath();
-      ctx.ellipse(cx, baseY + 2, 15, 8, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#36a8bd';
-      ctx.beginPath();
-      ctx.ellipse(cx, baseY + 1, 12, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-      break;
-    }
-
-    case 'coffee_roaster': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 20, '#9e4b3d', '#48505a', { windows: win(1, 3) });
-      drawIsoHippedRoof(ctx, cx, baseY - 20, b.w, b.h, 11, '#444c56');
-      drawIsoPrism(ctx, cx - 4, baseY + 8, 1.5, 0.45, 4, '#227a52', '#f5b700', { inset: 0.02 });
-      break;
-    }
-
-    case 'music_club': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 26, '#8f4338', '#461d7c', { windows: win(2, 3) });
-      drawIsoPrism(ctx, cx, baseY - 26, b.w + 0.04, b.h + 0.04, 4, '#461d7c', '#f5b700');
-      // Glowing Neon Marquee!
-      drawIsoPrism(ctx, cx - 6, baseY + 10, 1.4, 0.4, 9, '#461d7c', lit ? '#ffe680' : '#f5b700', { inset: 0.02 });
-      if (lit && nightAmount > 0.15) {
-        lightsOut.push({ x: cx, y: baseY - 8, r: 54, color: '185, 110, 255', alpha: nightAmount * 0.4 });
+      drawPxPrism(pb, cx, baseY, w, h, 8, '#d4c6a8', '#529e3a', { inset: 0.04, brickTex: true });
+      const pool = pxFootprint(cx + 8, baseY - 6, w * 0.44, h * 0.48, 0.04);
+      pb.fillPoly([pool.n, pool.e, pool.s, pool.w], (x, y) => ((x + y) % 4 === 0 ? PAL.waterSpark : PAL.waterHi));
+      drawPxDome(pb, cx - 10, baseY - 10, 12, 9, '#b5a892', false);
+      pb.rect(cx - 13, baseY - 14, 6, 5, PAL.archDark);
+      // Lush sanctuary palm & tropical shrub clusters inside the habitat!
+      for (const [bx, by] of [[-24, -4], [22, -14], [-4, -22], [18, 4]] as [number, number][]) {
+        pb.fillEllipse(cx + bx, baseY + by, 6, 4, PAL.grassShade);
+        pb.fillEllipse(cx + bx - 1, baseY + by - 2, 5, 3, PAL.grassHi);
       }
       break;
     }
 
+    case 'nat_museum': {
+      drawPxPrism(pb, cx, baseY, w, h, 24, '#f5f0e2', '#e0d8c8', { windows: true, arches: true, nightLit });
+      drawPxDome(pb, cx, baseY - 24, 15, 11, '#78d8e6', false);
+      break;
+    }
+
+    case 'concert_hall': {
+      const rx = Math.round(w * 14);
+      pb.fillEllipse(cx, baseY - 2, rx, Math.round(rx * 0.48), PAL.stoneMid);
+      pb.fillEllipse(cx, baseY - 5, Math.round(rx * 0.72), Math.round(rx * 0.34), PAL.stoneHi);
+      drawPxDome(pb, cx - 8, baseY - 10, 14, 12, '#efe5cf', false);
+      break;
+    }
+
+    case 'tiger_statue': {
+      // Heroic Bronze Tiger Monument on Stepped Limestone Plinth!
+      drawPxPrism(pb, cx, baseY, 0.9, 0.9, 9, '#e8dec8', '#f5ebd2', { inset: 0.08 });
+      pb.rect(cx - 7, baseY - 17, 14, 8, hexToRGBA('#b87e30'));
+      pb.rect(cx - 5, baseY - 21, 6, 5, hexToRGBA('#d99b38'));
+      pb.rect(cx + 6, baseY - 15, 4, 2, hexToRGBA('#8c5920'));
+      break;
+    }
+
+    // ===== SLICE 4: COLLEGE TOWN STRIP =====
+    case 'town_center': {
+      drawPxPrism(pb, cx, baseY, w, h, 24, '#f2e0be', '#5e2ca5', { windows: true, arches: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 24, w, h, 11, '#552494', 0.02);
+      drawPxDome(pb, cx, baseY - 35, 10, 8, '#f7c21b', true);
+      break;
+    }
+    case 'coffee_roaster': {
+      drawPxPrism(pb, cx, baseY, w, h, 18, '#f5d2a4', '#d95e38', { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 18, w, h, 9, '#c7523a', 0.02);
+      for (let k = -8; k <= 8; k += 4) {
+        pb.rect(cx - 10 + k, baseY - 6 + Math.round(k * 0.4), 3, 4, (k / 4) % 2 === 0 ? hexToRGBA('#d93848') : PAL.stuccoHi);
+      }
+      break;
+    }
+    case 'music_club': {
+      drawPxPrism(pb, cx, baseY, w, h, 21, '#4c2c73', '#2d194d', { windows: true, nightLit: true });
+      drawPxHippedRoof(pb, cx, baseY - 21, w, h, 8, '#381e5c', 0.03);
+      pb.rect(cx - 12, baseY - 15, 12, 5, hexToRGBA('#ff42a1'));
+      pb.hline(cx - 11, cx - 2, baseY - 13, PAL.goldHi);
+      break;
+    }
     case 'student_lofts': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 12, '#dfd5c0', '#cfc5b0', { windows: win(1, 4) });
-      drawIsoPrism(ctx, cx, baseY - 12, b.w * 0.96, b.h * 0.96, 36, '#a44c3d', '#c2543a', {
-        windows: win(3, 4),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 48, b.w, b.h, 12, '#c2543a');
+      drawPxPrism(pb, cx, baseY, w, h, 30, '#e6b88a', '#7c4c3a', { windows: true, nightLit, brickTex: true });
+      drawPxHippedRoof(pb, cx, baseY - 30, w, h, 10, '#6e4032', 0.02);
       break;
     }
-
-    case 'boutique_hotel': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 62, '#ede3ce', '#d8ccb2', {
-        windows: win(5, 5),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - 62, b.w, b.h, 16, '#c2543a');
-      drawIsoDome(ctx, cx, baseY - 74, 14, 10, '#f5b700');
-      break;
-    }
-
     case 'crawfish_house': {
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, 18, '#8a5d38', '#9e4336', { windows: win(1, 3) });
-      drawIsoHippedRoof(ctx, cx, baseY - 18, b.w, b.h, 12, '#b04032');
+      drawPxPrism(pb, cx, baseY, w, h, 20, '#d65c3e', '#4a3f3a', { windows: true, nightLit, brickTex: true });
+      drawPxHippedRoof(pb, cx, baseY - 20, w, h, 9, '#423732', 0.02);
+      pb.rect(cx - 8, baseY - 14, 16, 4, PAL.goldHi);
+      break;
+    }
+    case 'boutique_hotel': {
+      drawPxPrism(pb, cx, baseY, w, h, 34, '#f5e8cc', '#5e2ca5', {
+        windows: true,
+        arches: true,
+        nightLit,
+      });
+      drawPxHippedRoof(pb, cx, baseY - 34, w, h, 12, '#552494', 0.01);
+      pb.rect(cx - 5, baseY - 47, 10, 4, PAL.goldLit);
       break;
     }
 
     default: {
-      // Lecture Hall, Humanities, Music, Art, Honors, Education
-      const h = b.type === 'humanities_college' ? 30 : 26;
-      drawIsoPrism(ctx, cx, baseY, b.w, b.h, h, '#ede3ce', '#d8ccb2', {
-        windows: win(2, Math.max(3, b.w)),
-        eaveShadow: true,
-      });
-      drawIsoHippedRoof(ctx, cx, baseY - h, b.w, b.h, 16, '#c2543a');
-      if (b.type === 'honors_college') drawIsoDome(ctx, cx, baseY - h - 10, 9, 8, '#f5b700');
-      if (b.type === 'music_college') {
-        drawIsoPrism(ctx, cx - 8, baseY + 12, 1.8, 0.4, 4, '#461d7c', '#f5b700');
-      }
-      break;
+      const hex = spec?.accentColor ?? stucco;
+      drawPxPrism(pb, cx, baseY, w, h, 20, stucco, hex, { windows: true, nightLit });
+      drawPxHippedRoof(pb, cx, baseY - 20, w, h, 11, hex, 0.02);
     }
+  }
+
+  // Automatic 1px dark-plum 16-bit silhouette outline around the finished building!
+  pb.applyOutline(PAL.outline);
+
+  const sprite = pb.toSprite(anchorX, anchorY);
+  buildingCache.set(key, sprite);
+  return sprite;
+}
+
+export function drawBuilding2D(
+  ctx: CanvasRenderingContext2D,
+  b: BuildingInstance,
+  cx: number,
+  baseY: number,
+  state: GameState,
+  elapsed: number,
+  nightAmount: number,
+  lightsOut: LightGlow[],
+): void {
+  const underConstruction = b.built < 1;
+  const nightLit = nightAmount > 0.22 && b.powered && !b.flooded && !b.blackout;
+  const sprite = getBuildingSprite(
+    b.type,
+    b.w,
+    b.h,
+    b.tier,
+    b.pilings,
+    nightLit,
+    underConstruction,
+    b.flooded,
+  );
+
+  const ix = Math.round(cx - sprite.anchorX);
+  const iy = Math.round(baseY - sprite.anchorY);
+  ctx.drawImage(sprite.canvas, ix, iy);
+
+  const drawY = b.pilings ? baseY - 12 : baseY;
+
+  // Animated pacing pixel Bengal Tiger ("Roux")!
+  if (b.type === 'tiger_habitat' && !underConstruction) {
+    const pace = Math.sin(elapsed * 1.4) * 10;
+    const tx = Math.round(cx + pace);
+    const ty = Math.round(drawY - 9 + pace * 0.25);
+    ctx.fillStyle = '#23152b';
+    ctx.fillRect(tx - 5, ty - 4, 10, 6);
+    ctx.fillStyle = '#f58c28';
+    ctx.fillRect(tx - 4, ty - 3, 8, 4);
+    ctx.fillStyle = '#23152b';
+    ctx.fillRect(tx - 2, ty - 3, 1, 3);
+    ctx.fillRect(tx + 1, ty - 3, 1, 3);
+    ctx.fillStyle = '#fff5dc';
+    ctx.fillRect(tx + 3, ty - 2, 2, 2);
+  }
+
+  // Night & Game-Night warm additive glow halos!
+  if (!underConstruction) {
+    if (b.type === 'bell_tower' && nightAmount > 0.2) {
+      lightsOut.push({ x: cx, y: drawY - 68, r: 58, color: '255, 224, 130', alpha: nightAmount * 0.42 });
+    } else if (b.type === 'library' && b.tier >= 1 && nightAmount > 0.2) {
+      lightsOut.push({ x: cx, y: drawY - 46, r: 64, color: '255, 215, 110', alpha: nightAmount * 0.36 });
+    } else if (b.type === 'substation') {
+      lightsOut.push({
+        x: cx,
+        y: drawY - 22,
+        r: 22,
+        color: b.flooded ? '255, 50, 55' : '50, 235, 130',
+        alpha: 0.40,
+      });
+    } else if (b.type === 'stadium' && b.tier >= 1) {
+      const gameNight = state.football.active && state.football.nightGame;
+      if (gameNight || nightAmount > 0.2) {
+        lightsOut.push({
+          x: cx,
+          y: drawY - 48,
+          r: gameNight ? 115 : 80,
+          color: '255, 240, 185',
+          alpha: gameNight ? 0.24 : nightAmount * 0.20,
+        });
+      }
+    } else if (nightLit && (b.type === 'founders_hall' || b.type === 'union' || b.type === 'music_club' || b.type === 'boutique_hotel')) {
+      lightsOut.push({
+        x: cx,
+        y: drawY - 18,
+        r: 44,
+        color: b.type === 'music_club' ? '255, 110, 200' : '255, 222, 130',
+        alpha: nightAmount * 0.30,
+      });
+    }
+  }
+
+  // Crisp pixel Flooded / Unpowered status badge icon above building!
+  if (b.flooded || (!b.powered && !underConstruction && CATALOG[b.type].needsPower)) {
+    const bob = Math.round(Math.sin(elapsed * 5 + cx * 0.1) * 2);
+    const bx = Math.round(cx - 7);
+    const by = Math.round(drawY - 42 + bob);
+    ctx.fillStyle = '#23152b';
+    ctx.fillRect(bx - 1, by - 1, 16, 15);
+    ctx.fillStyle = b.flooded ? '#2882c8' : '#e83838';
+    ctx.fillRect(bx, by, 14, 13);
+    ctx.fillStyle = '#fff5dc';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(b.flooded ? '~' : '!', bx + 7, by + 10);
   }
 }
 
-function thisField2D(ctx: CanvasRenderingContext2D, cx: number, cy: number, wTiles: number, hTiles: number): void {
-  const fc = footprintCorners(cx, cy, wTiles, hTiles, 0.08);
-  drawPoly(ctx, [fc.n, fc.e, fc.s, fc.w], '#34853c', '#ffffff', 1.5);
+// ===== 16-BIT PIXEL ART LOUISIANA TREES & FLORA =====
 
-  // Purple & Gold End Zones along the long axis
-  const lerp = (a: [number, number], b: [number, number], t: number): [number, number] => [
-    a[0] + (b[0] - a[0]) * t,
-    a[1] + (b[1] - a[1]) * t,
-  ];
-  drawPoly(ctx, [fc.n, lerp(fc.n, fc.e, 0.14), lerp(fc.w, fc.s, 0.14), fc.w], '#461d7c');
-  drawPoly(ctx, [lerp(fc.n, fc.e, 0.86), fc.e, fc.s, lerp(fc.w, fc.s, 0.86)], '#f5b700');
+function getTreeSprite(
+  kind: VegInstance['kind'],
+  variant: number,
+  autumn: boolean,
+): CachedSprite {
+  const key = `${kind}|v${variant}|a${autumn ? 1 : 0}`;
+  const hit = treeCache.get(key);
+  if (hit) return hit;
 
-  // Crisp white yard lines
-  ctx.strokeStyle = 'rgba(255,255,255,0.72)';
-  ctx.lineWidth = 1;
-  for (let y = 1; y <= 7; y++) {
-    const t = 0.14 + (0.72 * y) / 8;
-    const p1 = lerp(fc.n, fc.e, t);
-    const p2 = lerp(fc.w, fc.s, t);
-    ctx.beginPath();
-    ctx.moveTo(p1[0], p1[1]);
-    ctx.lineTo(p2[0], p2[1]);
-    ctx.stroke();
+  const isOak = kind === 'oak';
+  const isCypress = kind === 'cypress';
+  const w = isOak ? 58 : isCypress ? 38 : 28;
+  const h = isOak ? 52 : isCypress ? 52 : 28;
+  const cx = Math.floor(w * 0.5);
+  const baseY = h - 9;
+
+  const pb = new PixelBuffer(w, h);
+
+  // Dithered pixel ground shadow (SE)
+  const shRx = isOak ? 18 : isCypress ? 11 : 7;
+  const shRy = isOak ? 8 : isCypress ? 5 : 4;
+  pb.fillEllipse(cx + 5, baseY + 2, shRx, shRy, (x, y) => ((x + y) & 1) === 0 ? PAL.shadowDeep : PAL.shadow);
+
+  if (isOak) {
+    pb.rect(cx - 4, baseY - 14, 8, 14, PAL.woodShade);
+    pb.rect(cx - 3, baseY - 14, 3, 14, PAL.woodLit);
+    pb.rect(cx - 6, baseY - 2, 12, 3, PAL.woodDark);
+    pb.line(cx - 2, baseY - 11, cx - 12, baseY - 18, PAL.woodDark);
+    pb.line(cx + 2, baseY - 11, cx + 11, baseY - 18, PAL.woodDark);
+
+    const puffs: [number, number, number, number][] = [
+      [cx - 12, baseY - 20, 11, 8],
+      [cx + 12, baseY - 19, 11, 8],
+      [cx, baseY - 27, 15, 11],
+      [cx - 7, baseY - 25, 10, 8],
+      [cx + 8, baseY - 24, 10, 8],
+    ];
+    for (const [px0, py0, rx, ry] of puffs) {
+      pb.fillEllipse(px0, py0, rx, ry, (x, y, nx, ny) => {
+        const light = -nx * 0.55 - ny * 0.65;
+        const grain = hash2(x + variant * 13, y);
+        if (light > 0.35 && grain > 0.25) return PAL.grassHi;
+        if (light > -0.05) return grain > 0.6 ? PAL.grassHi : PAL.grassLit;
+        if (light > -0.45) return bayer4(x, y) > 0.5 ? PAL.grassMid : PAL.grassShade;
+        return PAL.grassDark;
+      });
+    }
+
+    const mossXs = [-14, -8, -1, 7, 13];
+    for (let m = 0; m < mossXs.length; m++) {
+      const mx = cx + mossXs[m];
+      const len = 7 + ((m * 3 + variant) % 5);
+      const topY = baseY - 15 - (m === 2 ? 2 : 0);
+      pb.line(mx, topY, mx, topY + len, PAL.mossHi);
+      pb.line(mx + 1, topY + 1, mx + 1, topY + len - 2, PAL.mossMid);
+    }
+  } else if (isCypress) {
+    pb.fillPoly(
+      [
+        [cx - 5, baseY + 1],
+        [cx + 5, baseY + 1],
+        [cx + 2, baseY - 18],
+        [cx - 2, baseY - 18],
+      ],
+      (x, _y) => (x < cx ? PAL.woodLit : PAL.woodDark),
+    );
+    pb.rect(cx - 8, baseY - 4, 2, 5, PAL.woodLit);
+    pb.rect(cx + 7, baseY - 3, 2, 4, PAL.woodShade);
+
+    const cHi = autumn ? hexToRGBA('#f29c38') : PAL.grassHi;
+    const cLit = autumn ? hexToRGBA('#d66828') : PAL.grassLit;
+    const cMid = autumn ? hexToRGBA('#a84222') : PAL.wetLit;
+    const cDark = autumn ? hexToRGBA('#6e261c') : PAL.wetShade;
+
+    const tiers: [number, number, number, number][] = [
+      [cx, baseY - 16, 13, 6],
+      [cx, baseY - 24, 11, 6],
+      [cx, baseY - 31, 8, 5],
+      [cx, baseY - 37, 5, 4],
+    ];
+    for (const [px0, py0, rx, ry] of tiers) {
+      pb.fillEllipse(px0, py0, rx, ry, (x, y, nx, ny) => {
+        const l = -nx * 0.5 - ny * 0.6;
+        if (l > 0.35) return cHi;
+        if (l > -0.05) return bayer4(x, y) > 0.5 ? cLit : cMid;
+        return cDark;
+      });
+    }
+    pb.line(cx - 7, baseY - 13, cx - 7, baseY - 7, PAL.mossHi);
+    pb.line(cx + 6, baseY - 14, cx + 6, baseY - 8, PAL.mossMid);
+  } else if (kind === 'azalea') {
+    pb.fillEllipse(cx, baseY - 5, 9, 6, (x, y, nx, ny) => {
+      const h = hash2(x + variant * 17, y);
+      if (h > 0.72) return ny < 0 ? PAL.azaleaHi : PAL.azaleaMid;
+      if (h > 0.58) return PAL.azaleaShade;
+      return -nx - ny > 0 ? PAL.grassLit : PAL.grassDark;
+    });
+  } else {
+    const angles = [-2.4, -1.9, -1.5, -1.1, -0.7];
+    for (const a of angles) {
+      const ex = cx + Math.round(Math.cos(a) * 10);
+      const ey = baseY - 3 + Math.round(Math.sin(a) * 9);
+      pb.line(cx, baseY - 2, ex, ey, PAL.grassHi);
+      pb.line(cx, baseY - 1, ex, ey + 1, PAL.grassShade);
+    }
   }
 
-  // Midfield Gold Tiger Medallion
-  ctx.fillStyle = '#f5b700';
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, 7, 3.8, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#461d7c';
-  ctx.lineWidth = 1.4;
-  ctx.stroke();
-
-  // Yellow 2D goalposts at both end zones!
-  const g1 = lerp(fc.n, fc.w, 0.5);
-  const g2 = lerp(fc.e, fc.s, 0.5);
-  ctx.strokeStyle = '#ffd11a';
-  ctx.lineWidth = 1.8;
-  for (const gp of [g1, g2]) {
-    ctx.beginPath();
-    ctx.moveTo(gp[0], gp[1]);
-    ctx.lineTo(gp[0], gp[1] - 11);
-    ctx.moveTo(gp[0] - 4, gp[1] - 7);
-    ctx.lineTo(gp[0] + 4, gp[1] - 7);
-    ctx.moveTo(gp[0] - 4, gp[1] - 7);
-    ctx.lineTo(gp[0] - 4, gp[1] - 15);
-    ctx.moveTo(gp[0] + 4, gp[1] - 7);
-    ctx.lineTo(gp[0] + 4, gp[1] - 15);
-    ctx.stroke();
-  }
+  pb.applyOutline(PAL.outline);
+  const sprite = pb.toSprite(cx, baseY);
+  treeCache.set(key, sprite);
+  return sprite;
 }
 
 export function drawTree2D(
   ctx: CanvasRenderingContext2D,
-  kind: 'oak' | 'cypress' | 'azalea' | 'palmetto',
-  x: number,
-  y: number,
-  scale: number,
-  swayPx: number,
-  autumnAmt: number,
+  tree: VegInstance,
+  cx: number,
+  baseY: number,
+  elapsed: number,
+  autumn: boolean,
 ): void {
-  // Soft contact shadow
-  ctx.fillStyle = 'rgba(24, 20, 48, 0.22)';
-  ctx.beginPath();
-  ctx.ellipse(x + 4, y + 2, 11 * scale, 5.5 * scale, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (kind === 'oak') {
-    // Southern Live Oak with spreading gnarled canopy & hanging Spanish moss!
-    ctx.strokeStyle = '#4e3928';
-    ctx.lineWidth = 4 * scale;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + swayPx * 0.25, y - 13 * scale);
-    ctx.stroke();
-
-    const cx = x + swayPx;
-    const cy = y - 17 * scale;
-    const grad = ctx.createRadialGradient(cx - 6 * scale, cy - 5 * scale, 2, cx, cy, 18 * scale);
-    grad.addColorStop(0, '#5a823f');
-    grad.addColorStop(0.55, '#385e2a');
-    grad.addColorStop(1, '#233b22');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, 16 * scale, 10 * scale, 0, 0, Math.PI * 2);
-    ctx.ellipse(cx - 8 * scale, cy + 2 * scale, 10 * scale, 7 * scale, 0, 0, Math.PI * 2);
-    ctx.ellipse(cx + 8 * scale, cy + 2 * scale, 10 * scale, 7 * scale, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Hanging Spanish Moss Drapes!
-    ctx.strokeStyle = 'rgba(176, 190, 152, 0.85)';
-    ctx.lineWidth = 1.6 * scale;
-    for (const ox of [-9, -3, 4, 10]) {
-      ctx.beginPath();
-      ctx.moveTo(cx + ox * scale, cy + 5 * scale);
-      ctx.lineTo(cx + ox * scale + swayPx * 0.4, cy + 12 * scale);
-      ctx.stroke();
-    }
-  } else if (kind === 'cypress') {
-    // Bald Cypress (turns fiery rust-orange in November!)
-    ctx.fillStyle = '#4a3525';
-    ctx.beginPath();
-    ctx.moveTo(x - 3.5 * scale, y);
-    ctx.lineTo(x + 3.5 * scale, y);
-    ctx.lineTo(x + 1.4 * scale + swayPx * 0.3, y - 15 * scale);
-    ctx.lineTo(x - 1.4 * scale + swayPx * 0.3, y - 15 * scale);
-    ctx.closePath();
-    ctx.fill();
-
-    const baseHex = autumnAmt > 0.5 ? '#cc6c2b' : autumnAmt > 0.1 ? '#7d6b34' : '#3d663e';
-    const tx = x + swayPx;
-    drawPoly(
-      ctx,
-      [
-        [tx, y - 34 * scale],
-        [tx + 10 * scale, y - 11 * scale],
-        [tx - 10 * scale, y - 11 * scale],
-      ],
-      shadeColor(baseHex, 1.04),
-    );
-    drawPoly(
-      ctx,
-      [
-        [tx, y - 34 * scale],
-        [tx + 10 * scale, y - 11 * scale],
-        [tx, y - 10 * scale],
-      ],
-      shadeColor(baseHex, 0.78, '#2b2550', 0.2),
-    );
-  } else if (kind === 'azalea') {
-    ctx.fillStyle = '#2d5c2b';
-    ctx.beginPath();
-    ctx.ellipse(x, y - 3, 8.5 * scale, 5.5 * scale, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ee5588';
-    for (const [ox, oy] of [[-4, -4], [0, -6], [4, -4], [-1, -2]]) {
-      ctx.beginPath();
-      ctx.arc(x + ox * scale, y + oy * scale, 2.6 * scale, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  } else {
-    // Marsh palmetto fan
-    ctx.fillStyle = '#4e7e36';
-    ctx.beginPath();
-    ctx.ellipse(x, y - 3, 7 * scale, 4 * scale, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  const variant = (Math.round(tree.tx * 7 + tree.ty * 13) & 3);
+  const sprite = getTreeSprite(tree.kind, variant, autumn && tree.kind === 'cypress');
+  const sway = Math.round(Math.sin(elapsed * 1.6 + tree.tx * 0.9) * (tree.kind === 'oak' ? 0.6 : 0.4));
+  ctx.drawImage(sprite.canvas, Math.round(cx - sprite.anchorX + sway), Math.round(baseY - sprite.anchorY));
 }
 
-export { HALF_H, HALF_W };
+// ===== 16-BIT PIXEL ART LIVING ENTITIES =====
+
+export function drawPixelStudent(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  shirt: 'purple' | 'gold' | 'white' | 'lavender',
+  walkPhase: number,
+  umbrella = false,
+): void {
+  const step = Math.floor(walkPhase) & 1;
+  const key = `stu|${shirt}|${step}|u${umbrella ? 1 : 0}`;
+  let sp = entityCache.get(key);
+  if (!sp) {
+    const hexMap: Record<typeof shirt, string> = {
+      purple: '#6e32c4',
+      gold: '#f7c21b',
+      white: '#f2e8cf',
+      lavender: '#9b72cf',
+    };
+    const shirtHex = hexMap[shirt];
+    const pb = new PixelBuffer(14, 18);
+    const col = hexToRGBA(shirtHex);
+    const colDark = shadeRGBA(shirtHex, 0.72);
+    pb.fillEllipse(7, 15, 3, 1.5, PAL.shadowDeep);
+    pb.rect(5, 12 + (step ? 0 : 1), 2, 3, hexToRGBA('#3b4c73'));
+    pb.rect(7, 12 + (step ? 1 : 0), 2, 3, hexToRGBA('#273352'));
+    pb.rect(5, 8, 4, 4, col);
+    pb.rect(7, 8, 2, 4, colDark);
+    pb.rect(4, 8, 2, 3, PAL.goldLit);
+    pb.rect(5, 5, 4, 3, hexToRGBA('#f5c99b'));
+    pb.rect(5, 4, 4, 2, hexToRGBA('#472c24'));
+    if (umbrella) {
+      pb.fillEllipse(7, 4, 5, 3, PAL.purpleHi);
+    }
+    pb.applyOutline(PAL.outline);
+    sp = pb.toSprite(7, 15);
+    entityCache.set(key, sp);
+  }
+  ctx.drawImage(sp.canvas, Math.round(x - sp.anchorX), Math.round(y - sp.anchorY));
+}
+
+export function drawPixelGator(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  elapsed: number,
+): void {
+  const frame = Math.floor(elapsed * 2.5) & 1;
+  const key = `gator|${frame}`;
+  let sp = entityCache.get(key);
+  if (!sp) {
+    const pb = new PixelBuffer(26, 14);
+    pb.hline(3, 22, 9, PAL.waterSpark);
+    pb.fillEllipse(12, 7, 8, 3, PAL.grassShade);
+    pb.fillEllipse(12, 6, 7, 2, PAL.grassLit);
+    pb.hline(2, 6, 7 + (frame ? 0 : 1), PAL.grassShade);
+    pb.hline(2, 5, 6 + (frame ? 0 : 1), PAL.grassHi);
+    pb.rect(18, 6, 5, 2, PAL.grassLit);
+    pb.px(18, 5, PAL.goldHi);
+    pb.px(16, 5, PAL.goldHi);
+    pb.px(9, 5, PAL.grassHi);
+    pb.px(12, 5, PAL.grassHi);
+    pb.px(15, 5, PAL.grassHi);
+    pb.applyOutline(PAL.outline);
+    sp = pb.toSprite(13, 8);
+    entityCache.set(key, sp);
+  }
+  ctx.drawImage(sp.canvas, Math.round(x - sp.anchorX), Math.round(y - sp.anchorY));
+}
+
+export function drawPixelPirogue(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  cajunNavy = false,
+): void {
+  const key = cajunNavy ? 'pirogue_cn' : 'pirogue';
+  let sp = entityCache.get(key);
+  if (!sp) {
+    const pb = new PixelBuffer(26, 16);
+    pb.fillEllipse(13, 10, 10, 3, PAL.shadow);
+    pb.fillEllipse(13, 8, 10, 3, cajunNavy ? hexToRGBA('#e85638') : PAL.woodLit);
+    pb.fillEllipse(13, 7, 7, 2, PAL.woodDark);
+    pb.rect(11, 4, 4, 4, cajunNavy ? PAL.goldHi : PAL.purpleLit);
+    pb.rect(10, 2, 6, 2, PAL.goldHi);
+    pb.applyOutline(PAL.outline);
+    sp = pb.toSprite(13, 9);
+    entityCache.set(key, sp);
+  }
+  ctx.drawImage(sp.canvas, Math.round(x - sp.anchorX), Math.round(y - sp.anchorY));
+}
+
+export function drawPixelVehicle(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  kind: 'fogger' | 'officer' | 'parade_float' | 'shuttle',
+  floatIndex = 0,
+): void {
+  const key = `veh|${kind}|${floatIndex}`;
+  let sp = entityCache.get(key);
+  if (!sp) {
+    const isFloat = kind === 'parade_float';
+    const pb = new PixelBuffer(isFloat ? 44 : 28, isFloat ? 38 : 24);
+    const cx = Math.floor(pb.w * 0.5);
+    const by = pb.h - 7;
+    if (kind === 'fogger') {
+      drawPxPrism(pb, cx, by, 0.55, 0.35, 8, '#f0f2f5', '#42b8c8', { inset: 0.02, cornice: false, castShadow: true });
+      pb.rect(cx - 5, by - 9, 4, 3, PAL.winDayHi);
+    } else if (kind === 'officer') {
+      drawPxPrism(pb, cx, by, 0.52, 0.34, 8, '#4e7a46', '#385c34', { inset: 0.02, cornice: false, castShadow: true });
+      pb.rect(cx - 3, by - 10, 4, 2, PAL.goldHi);
+    } else if (kind === 'shuttle') {
+      drawPxPrism(pb, cx, by, 0.68, 0.36, 9, '#5e2ca5', '#f7c21b', { inset: 0.02, cornice: false, castShadow: true });
+      pb.hline(cx - 7, cx + 6, by - 5, PAL.goldHi);
+    } else {
+      const bodyHex = floatIndex === 0 ? '#692eb8' : floatIndex === 1 ? '#1fa85c' : '#f5b700';
+      const trimHex = floatIndex === 1 ? '#f5b700' : '#ffd84d';
+      drawPxPrism(pb, cx, by, 1.05, 0.58, 12, bodyHex, trimHex, { inset: 0.03, castShadow: true });
+      drawPxDome(pb, cx, by - 13, 9, 9, floatIndex === 1 ? '#36c96c' : '#f7c21b', floatIndex === 0);
+      for (let k = -8; k <= 8; k += 4) {
+        pb.px(cx + k, by - 4, k % 8 === 0 ? PAL.goldHi : PAL.azaleaHi);
+      }
+    }
+    pb.applyOutline(PAL.outline);
+    sp = pb.toSprite(cx, by);
+    entityCache.set(key, sp);
+  }
+  ctx.drawImage(sp.canvas, Math.round(x - sp.anchorX), Math.round(y - sp.anchorY));
+}
