@@ -234,6 +234,7 @@ export class Renderer2D {
       pilings: boolean;
       valid: boolean;
       snapped: boolean;
+      trail?: { tx: number; ty: number; valid: boolean }[];
     },
     cursorTile: { tx: number; ty: number } | null,
   ): void {
@@ -538,12 +539,12 @@ export class Renderer2D {
       );
     }
 
-    // Tree canopy ground shadows
+    // Tree canopy ground shadows (centered on tile!)
     for (const tree of state.veg) {
       const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.tx)));
       const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.ty)));
       const elev = Math.max(0.25, tiles.elev[idx(txI, tyI)]);
-      const p = tileToIso(tree.tx, tree.ty, elev);
+      const p = tileToIso(tree.tx + 0.5, tree.ty + 0.5, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
       const rx = tree.kind === 'oak' ? 29 : tree.kind === 'cypress' ? 17 : 8;
       const ry = tree.kind === 'oak' ? 12 : tree.kind === 'cypress' ? 7 : 4;
@@ -643,17 +644,17 @@ export class Renderer2D {
       });
     }
 
-    // 2c. Louisiana Trees & Flora
+    // 2c. Louisiana Trees & Flora (centered cleanly on their tile!)
     const isAutumn = state.season === 'fall';
     for (const tree of state.veg) {
       const txI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.tx)));
       const tyI = Math.max(0, Math.min(MAP_SIZE - 1, Math.floor(tree.ty)));
       const elev = Math.max(0.25, tiles.elev[idx(txI, tyI)]);
-      const p = tileToIso(tree.tx, tree.ty, elev);
+      const p = tileToIso(tree.tx + 0.5, tree.ty + 0.5, elev);
       if (p.x < minWX || p.x > maxWX || p.y < minWY || p.y > maxWY) continue;
 
       items.push({
-        depth: tree.tx + tree.ty - 0.15,
+        depth: tree.tx + tree.ty + 0.65,
         draw: () => drawTree2D(ctx, tree, p.x, p.y, elapsed, isAutumn),
       });
     }
@@ -801,8 +802,40 @@ export class Renderer2D {
       ctx.fillRect(bx + 2, by - flap, 3, 2);
     }
 
-    // ===== PASS 3: PIXEL PLACEMENT GHOST & MAGNETIC SNAP PREVIEW =====
-    if (ghost.toolId || ghost.bulldoze) {
+    // ===== PASS 3: PIXEL PLACEMENT GHOST, REVERSIBLE DRAG TRAIL & MAGNETIC SNAP PREVIEW =====
+    if (ghost.trail && ghost.trail.length > 0) {
+      const centers: [number, number][] = [];
+      for (let ti = 0; ti < ghost.trail.length; ti++) {
+        const pt = ghost.trail[ti];
+        if (!inBounds(pt.tx, pt.ty)) continue;
+        const elev = Math.max(0.25, tiles.elev[idx(pt.tx, pt.ty)]);
+        const p = tileToIso(pt.tx + 0.5, pt.ty + 0.5, elev);
+        centers.push([p.x, p.y]);
+        const c = footprintCorners(p.x, p.y, 1, 1, 0.03);
+        const isHead = ti === ghost.trail.length - 1;
+        const fill = !pt.valid
+          ? 'rgba(235, 62, 62, 0.46)'
+          : isHead
+            ? 'rgba(255, 224, 72, 0.56)'
+            : 'rgba(66, 224, 120, 0.46)';
+        const stroke = !pt.valid ? '#ff5252' : isHead ? '#ffe45e' : '#58f28d';
+        drawPoly(ctx, [c.n, c.e, c.s, c.w], fill, stroke, 2);
+      }
+      // Crisp connecting gold route line along the draft path so reversing course is crystal clear!
+      if (centers.length >= 2) {
+        ctx.save();
+        ctx.strokeStyle = '#ffe45e';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(centers[0][0], centers[0][1]);
+        for (let ci = 1; ci < centers.length; ci++) {
+          ctx.lineTo(centers[ci][0], centers[ci][1]);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    } else if (ghost.toolId || ghost.bulldoze) {
       const spec = ghost.toolId ? CATALOG[ghost.toolId] : null;
       const w = spec ? (ghost.rot % 2 === 1 ? spec.h : spec.w) : 1;
       const h = spec ? (ghost.rot % 2 === 1 ? spec.w : spec.h) : 1;

@@ -253,4 +253,68 @@ describe('Bayou State 3D Simulation Core', () => {
     expect(charter.demolish(tree.tx, tree.ty)).toBe(true);
     expect(charter.state.veg.length).toBeLessThan(vegBefore);
   });
+
+  it('bulldozes trees/surfaces, levels ground under new buildings, and auto-connects a path to the nearest path', () => {
+    const sim = new SimEngine(1860, false);
+    sim.state.economy.cash = 20_000_000;
+    const { tiles } = sim.state;
+
+    // Create an existing campus path along ty = 13, tx = 40..46
+    for (let tx = 40; tx <= 46; tx++) {
+      sim.place('path', tx, 13, 0, false, true);
+    }
+
+    // Prepare an uneven, wooded, cluttered site 3 tiles south of that path (tx = 41..43, ty = 17..18)
+    const siteTx = 41;
+    const siteTy = 17;
+    tiles.elev[idx(siteTx, siteTy)] = 6.4;
+    tiles.elev[idx(siteTx + 1, siteTy)] = 5.1;
+    tiles.elev[idx(siteTx + 2, siteTy)] = 4.2;
+    tiles.elev[idx(siteTx, siteTy + 1)] = 5.8;
+    tiles.elev[idx(siteTx + 1, siteTy + 1)] = 4.6;
+    tiles.elev[idx(siteTx + 2, siteTy + 1)] = 3.9;
+    tiles.surface[idx(siteTx + 1, siteTy)] = SurfaceType.Quad;
+    // Plant trees right inside the building site AND along the auto-connect corridor
+    sim.state.veg.push(
+      { id: 99001, kind: 'oak', tx: siteTx + 1, ty: siteTy, scale: 1.1, rot: 0, planted: false },
+      { id: 99002, kind: 'cypress', tx: siteTx + 2, ty: siteTy + 1, scale: 1.0, rot: 0, planted: false },
+      { id: 99003, kind: 'oak', tx: siteTx + 1, ty: 15, scale: 1.0, rot: 0, planted: false },
+    );
+
+    const res = sim.place('dorm', siteTx, siteTy, 0, false, false);
+    expect(res.ok).toBe(true);
+
+    // 1. Every tile under the 3x2 dorm must be leveled to identical elevation and have no leftover surface
+    const leveledElev = tiles.elev[idx(siteTx, siteTy)];
+    for (let dy = 0; dy < 2; dy++) {
+      for (let dx = 0; dx < 3; dx++) {
+        const ti = idx(siteTx + dx, siteTy + dy);
+        expect(tiles.elev[ti]).toBe(leveledElev);
+        expect(tiles.surface[ti]).toBe(SurfaceType.None);
+      }
+    }
+
+    // 2. Zero trees remain inside the building footprint
+    const treesInside = sim.state.veg.filter(
+      (v) => v.tx >= siteTx && v.tx < siteTx + 3 && v.ty >= siteTy && v.ty < siteTy + 2,
+    );
+    expect(treesInside.length).toBe(0);
+
+    // 3. An auto-connected brick walkway now ties the dorm's north edge (ty = 16) straight up to ty = 13!
+    let connectedCol = -1;
+    for (let dx = 0; dx < 3; dx++) {
+      const cx = siteTx + dx;
+      if (
+        tiles.surface[idx(cx, 16)] === SurfaceType.Path &&
+        tiles.surface[idx(cx, 15)] === SurfaceType.Path &&
+        tiles.surface[idx(cx, 14)] === SurfaceType.Path
+      ) {
+        connectedCol = cx;
+        break;
+      }
+    }
+    expect(connectedCol).toBeGreaterThanOrEqual(siteTx);
+    // And any tree standing on the newly auto-connected path spur was cleared too!
+    expect(sim.state.veg.some((v) => v.tx === connectedCol && v.ty === 15)).toBe(false);
+  });
 });

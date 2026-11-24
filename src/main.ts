@@ -185,6 +185,72 @@ function tryApplyToolAt(tx: number, ty: number): void {
   }
 }
 
+interface DragTrailNode {
+  tx: number;
+  ty: number;
+  valid: boolean;
+  cost: number;
+}
+let dragTrail: DragTrailNode[] = [];
+
+function makeTrailNode(toolId: BuildingId, tx: number, ty: number): DragTrailNode {
+  const check = sim.canPlace(toolId, tx, ty, toolRot, hud.pilingsMode);
+  return { tx, ty, valid: check.ok, cost: check.ok ? check.cost : 0 };
+}
+
+/**
+ * Extends the drag-build preview trail orthogonally toward (targetTx, targetTy),
+ * OR reverses course by truncating back to any earlier tile the pointer moves back over!
+ */
+function extendOrReverseTrail(toolId: BuildingId, targetTx: number, targetTy: number): void {
+  if (!inBounds(targetTx, targetTy)) return;
+  if (dragTrail.length === 0) {
+    dragTrail.push(makeTrailNode(toolId, targetTx, targetTy));
+    return;
+  }
+
+  // Direct backtrack check: moving over any earlier tile in the trail trims back to it!
+  const hitIdx = dragTrail.findIndex((n) => n.tx === targetTx && n.ty === targetTy);
+  if (hitIdx >= 0) {
+    dragTrail.length = hitIdx + 1;
+    return;
+  }
+
+  // Walk orthogonal 1-tile steps from tail toward target so fast drags never leave gaps
+  let cx = dragTrail[dragTrail.length - 1].tx;
+  let cy = dragTrail[dragTrail.length - 1].ty;
+  let guard = 0;
+  while ((cx !== targetTx || cy !== targetTy) && guard < 40) {
+    guard++;
+    const dx = targetTx - cx;
+    const dy = targetTy - cy;
+    if (Math.abs(dx) >= Math.abs(dy)) cx += Math.sign(dx);
+    else cy += Math.sign(dy);
+
+    const prevIdx = dragTrail.findIndex((n) => n.tx === cx && n.ty === cy);
+    if (prevIdx >= 0) {
+      dragTrail.length = prevIdx + 1;
+    } else {
+      dragTrail.push(makeTrailNode(toolId, cx, cy));
+    }
+  }
+}
+
+function commitDragTrail(): void {
+  if (dragTrail.length === 0 || !hud.selectedTool) {
+    dragTrail = [];
+    return;
+  }
+  const toolId = hud.selectedTool;
+  let placedAny = false;
+  for (const node of dragTrail) {
+    const res = sim.place(toolId, node.tx, node.ty, toolRot, hud.pilingsMode);
+    if (res.ok) placedAny = true;
+  }
+  dragTrail = [];
+  if (placedAny) hud.render(true);
+}
+
 const dom = renderer.canvas;
 dom.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -195,6 +261,13 @@ dom.addEventListener('pointerdown', (e) => {
   dragStartY = e.clientY;
   dragMoved = false;
 
+  // Right-click while drafting a reversible path cancels the draft without spending cash!
+  if (e.button === 2 && isBuildDragging && dragTrail.length > 0) {
+    dragTrail = [];
+    isBuildDragging = false;
+    return;
+  }
+
   if (e.button === 2 || e.button === 1 || (e.button === 0 && !hud.selectedTool && !hud.bulldozeMode)) {
     isPanDragging = true;
     return;
@@ -202,9 +275,15 @@ dom.addEventListener('pointerdown', (e) => {
   if (e.button === 0 && (hud.selectedTool || hud.bulldozeMode)) {
     const hit = pickTile(e.clientX, e.clientY);
     if (hit) {
-      tryApplyToolAt(hit.tx, hit.ty);
-      if (hud.bulldozeMode || (hud.selectedTool && CATALOG[hud.selectedTool].drag)) {
+      if (hud.selectedTool && CATALOG[hud.selectedTool].drag) {
+        // Start reversible drag-preview trail instead of committing immediately!
+        dragTrail = [makeTrailNode(hud.selectedTool, hit.tx, hit.ty)];
         isBuildDragging = true;
+      } else {
+        tryApplyToolAt(hit.tx, hit.ty);
+        if (hud.bulldozeMode) {
+          isBuildDragging = true;
+        }
       }
     }
   }
@@ -228,7 +307,13 @@ window.addEventListener('pointermove', (e) => {
   if (hit) {
     hoverTx = hit.tx;
     hoverTy = hit.ty;
-    if (isBuildDragging) tryApplyToolAt(hit.tx, hit.ty);
+    if (isBuildDragging) {
+      if (hud.selectedTool && CATALOG[hud.selectedTool].drag) {
+        extendOrReverseTrail(hud.selectedTool, hit.tx, hit.ty);
+      } else if (hud.bulldozeMode) {
+        tryApplyToolAt(hit.tx, hit.ty);
+      }
+    }
   } else {
     hoverTx = -1;
     hoverTy = -1;
@@ -244,6 +329,9 @@ window.addEventListener('pointerup', (e) => {
       hud.openPopover = 'none';
       hud.render(true);
     }
+  }
+  if (isBuildDragging && dragTrail.length > 0 && e.button === 0) {
+    commitDragTrail();
   }
   isPanDragging = false;
   isBuildDragging = false;
@@ -266,6 +354,11 @@ window.addEventListener('keydown', (e) => {
   if (hud.showTitle) return;
 
   if (k === 'escape') {
+    if (dragTrail.length > 0) {
+      dragTrail = [];
+      isBuildDragging = false;
+      return;
+    }
     hud.photoMode = false;
     hud.selectedTool = null;
     hud.bulldozeMode = false;
@@ -352,9 +445,19 @@ function animate(now: number): void {
     if (simAccum > 4) simAccum = 0;
   }
 
-  // Compute ghost preview with magnetic path snapping
-  let ghost = {
-    toolId: null as BuildingId | null,
+  // Compute ghost preview with magnetic path snapping & reversible drag trail
+  let ghost: {
+    toolId: BuildingId | null;
+    bulldoze: boolean;
+    tx: number;
+    ty: number;
+    rot: 0 | 1 | 2 | 3;
+    pilings: boolean;
+    valid: boolean;
+    snapped: boolean;
+    trail?: { tx: number; ty: number; valid: boolean }[];
+  } = {
+    toolId: null,
     bulldoze: false,
     tx: -1,
     ty: -1,
@@ -364,7 +467,30 @@ function animate(now: number): void {
     snapped: false,
   };
 
-  if (!hud.showTitle && hud.selectedTool && inBounds(hoverTx, hoverTy)) {
+  if (!hud.showTitle && hud.selectedTool && dragTrail.length > 0) {
+    const def = CATALOG[hud.selectedTool];
+    const validNodes = dragTrail.filter((n) => n.valid);
+    const totalCost = validNodes.reduce((acc, n) => acc + n.cost, 0);
+    const costTxt = totalCost === 0 ? 'FREE' : `$${(totalCost / 1000).toFixed(0)}k`;
+    ghost = {
+      toolId: hud.selectedTool,
+      bulldoze: false,
+      tx: dragTrail[dragTrail.length - 1].tx,
+      ty: dragTrail[dragTrail.length - 1].ty,
+      rot: toolRot,
+      pilings: hud.pilingsMode,
+      valid: validNodes.length > 0,
+      snapped: false,
+      trail: dragTrail,
+    };
+    hud.setCursorHint(
+      true,
+      lastMouseX,
+      lastMouseY,
+      `${def.name} · ${validNodes.length} tile${validNodes.length === 1 ? '' : 's'} · ${costTxt}`,
+      'Release to build · Pull back to reverse · Right-click/Esc to cancel',
+    );
+  } else if (!hud.showTitle && hud.selectedTool && inBounds(hoverTx, hoverTy)) {
     const resolved = resolveToolCoords(hud.selectedTool, hoverTx, hoverTy);
     const check = sim.canPlace(hud.selectedTool, resolved.tx, resolved.ty, toolRot, hud.pilingsMode);
     const def = CATALOG[hud.selectedTool];

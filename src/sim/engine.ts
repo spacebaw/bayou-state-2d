@@ -1143,19 +1143,12 @@ export class SimEngine {
 
     this.state.buildings[bId] = inst;
 
-    for (let dy = 0; dy < h; dy++) {
-      for (let dx = 0; dx < w; dx++) {
-        const ti = idx(tx + dx, ty + dy);
-        tiles.owner[ti] = bId;
-        if (id === 'pond') {
-          tiles.flags[ti] |= TileFlag.PondSink;
-          tiles.elev[ti] = Math.min(tiles.elev[ti], 0.2);
-          tiles.depth[ti] = 1.4;
-        }
-      }
-    }
+    // 1. Bulldoze & level the ground uniformly beneath every newly constructed building!
+    this.prepareBuildingSite(tx, ty, w, h, id, bId);
 
-    this.clearVegAt(tx, ty, w, h);
+    // 2. Immediately snap & tie a brick walkway spur from the new building to the nearest existing path/road!
+    const pathTied = !free ? this.autoConnectPathToNearest(tx, ty, w, h, id) : false;
+
     if (!free) {
       classifyTiles(tiles);
       this.recomputeCoverage();
@@ -1172,10 +1165,232 @@ export class SimEngine {
 
     if (!free) {
       this.emit({ type: 'place', x: tx + w * 0.5, y: ty + h * 0.5 });
-      this.pushTicker(`Constructed ${inst.name}${usePilings ? ' on pilings' : ''}.`, 'info');
+      this.pushTicker(
+        `Constructed ${inst.name}${usePilings ? ' on pilings' : ''}${pathTied ? ' — path connected!' : '.'}`,
+        'info',
+      );
     }
 
     return { ok: true, cost: check.cost, buildingId: bId };
+  }
+
+  /**
+   * Prepares land beneath a newly placed building:
+   * - Bulldozes all trees/shrubs, old non-highway paths/roads/fences/quads, and canals inside the footprint
+   * - Levels every footprint tile uniformly to the pad mean elevation
+   * - Gently feathers steep 1-tile neighbor slopes so the graded pad blends cleanly into surrounding ground
+   */
+  private prepareBuildingSite(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+    id: BuildingId,
+    bId: number,
+  ): void {
+    const { tiles } = this.state;
+    const keepNaturalTerrain = id === 'pond' || id === 'surge_barrier' || id === 'rookery';
+
+    // Compute mean elevation across footprint for clean leveling (preserves floodplain realism)
+    let sumElev = 0;
+    let count = 0;
+    for (let dy = 0; dy < h; dy++) {
+      for (let dx = 0; dx < w; dx++) {
+        const ti = idx(tx + dx, ty + dy);
+        sumElev += tiles.elev[ti];
+        count++;
+      }
+    }
+    const padElev = count > 0 ? Math.round((sumElev / count) * 100) / 100 : 3.0;
+
+    for (let dy = 0; dy < h; dy++) {
+      for (let dx = 0; dx < w; dx++) {
+        const ti = idx(tx + dx, ty + dy);
+        tiles.owner[ti] = bId;
+
+        if (id === 'pond') {
+          tiles.flags[ti] |= TileFlag.PondSink;
+          tiles.elev[ti] = Math.min(tiles.elev[ti], 0.2);
+          tiles.depth[ti] = 1.4;
+          if (!(tiles.flags[ti] & TileFlag.Highway)) tiles.surface[ti] = SurfaceType.None;
+          continue;
+        }
+
+        // Bulldoze existing non-highway paths/surfaces/fences/canals under the building pad
+        if (!(tiles.flags[ti] & TileFlag.Highway)) {
+          tiles.surface[ti] = SurfaceType.None;
+        }
+        if (!keepNaturalTerrain) {
+          tiles.flags[ti] &= ~TileFlag.Canal;
+          tiles.elev[ti] = padElev;
+          if (tiles.depth[ti] < 0.8) tiles.depth[ti] = 0;
+          tiles.mosq[ti] = 0;
+        }
+      }
+    }
+
+    // Gently grade steep 1-tile perimeter skirt tiles so the leveled pad sits cleanly without jagged cliff edges
+    if (!keepNaturalTerrain) {
+      for (let dy = -1; dy <= h; dy++) {
+        for (let dx = -1; dx <= w; dx++) {
+          if (dx >= 0 && dx < w && dy >= 0 && dy < h) continue;
+          const nx = tx + dx;
+          const ny = ty + dy;
+          if (!inBounds(nx, ny)) continue;
+          const ni = idx(nx, ny);
+          if (tiles.owner[ni] >= 0 || tiles.crest[ni] > 0) continue;
+          if (tiles.flags[ni] & (TileFlag.OpenWater | TileFlag.Bayou | TileFlag.Canal | TileFlag.Preserve)) continue;
+          const diff = padElev - tiles.elev[ni];
+          if (Math.abs(diff) > 1.0) {
+            tiles.elev[ni] = Math.round((tiles.elev[ni] + diff * 0.45) * 100) / 100;
+          }
+        }
+      }
+    }
+
+    // Clear all trees/shrubs inside the footprint (and any wild non-planted tree encroaching on tile boundary)
+    this.clearVegAt(tx, ty, w, h);
+  }
+
+  /**
+   * Immediately ties a newly placed building into the nearest existing campus path/road/quad
+   * within 14 tiles using bounded shortest-path BFS (automatically clearing trees along the spur).
+   */
+  private autoConnectPathToNearest(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+    id: BuildingId,
+  ): boolean {
+    if (id === 'pond' || id === 'surge_barrier' || id === 'rookery' || id === 'bat_house') {
+      return false;
+    }
+
+    const { tiles } = this.state;
+    const isNetworkSurface = (sf: number): boolean =>
+      sf === SurfaceType.Path ||
+      sf === SurfaceType.Road ||
+      sf === SurfaceType.Boardwalk ||
+      sf === SurfaceType.Bridge ||
+      sf === SurfaceType.Quad ||
+      sf === SurfaceType.ParadeGround;
+
+    // Collect perimeter seed tiles ordered with front/south-east entrances first!
+    const seeds: number[] = [];
+    // South edge (ty + h)
+    for (let dx = 0; dx < w; dx++) {
+      if (inBounds(tx + dx, ty + h)) seeds.push(idx(tx + dx, ty + h));
+    }
+    // East edge (tx + w)
+    for (let dy = 0; dy < h; dy++) {
+      if (inBounds(tx + w, ty + dy)) seeds.push(idx(tx + w, ty + dy));
+    }
+    // West edge (tx - 1)
+    for (let dy = 0; dy < h; dy++) {
+      if (inBounds(tx - 1, ty + dy)) seeds.push(idx(tx - 1, ty + dy));
+    }
+    // North edge (ty - 1)
+    for (let dx = 0; dx < w; dx++) {
+      if (inBounds(tx + dx, ty - 1)) seeds.push(idx(tx + dx, ty - 1));
+    }
+
+    // If building already touches an existing walkable path/road/quad, it's already connected!
+    for (const si of seeds) {
+      if (isNetworkSurface(tiles.surface[si])) return false;
+    }
+
+    const MAX_DIST = 14;
+    const visited = new Uint8Array(TILE_COUNT);
+    const parent = new Int32Array(TILE_COUNT).fill(-1);
+    const dist = new Uint8Array(TILE_COUNT);
+    const queue: number[] = [];
+
+    const canTraverse = (ti: number): boolean => {
+      const cx = ti % MAP_SIZE;
+      const cy = Math.floor(ti / MAP_SIZE);
+      const pIdx = Math.floor(cy / 16) * 4 + Math.floor(cx / 16);
+      if (this.state.ownedParcels && !this.state.ownedParcels[pIdx]) return false;
+      if (tiles.owner[ti] >= 0) return false;
+      if (tiles.crest[ti] > 0) return false;
+      if (tiles.flags[ti] & (TileFlag.OpenWater | TileFlag.Preserve)) return false;
+      if (tiles.surface[ti] === SurfaceType.GatorFence) return false;
+      return true;
+    };
+
+    // Mark building footprint as visited so BFS never routes back through the building
+    for (let dy = 0; dy < h; dy++) {
+      for (let dx = 0; dx < w; dx++) {
+        visited[idx(tx + dx, ty + dy)] = 1;
+      }
+    }
+
+    for (const si of seeds) {
+      if (visited[si] || !canTraverse(si)) continue;
+      visited[si] = 1;
+      dist[si] = 1;
+      parent[si] = -2; // marks start perimeter tile
+      queue.push(si);
+    }
+
+    let targetTile = -1;
+    let qHead = 0;
+    const dirs = [
+      [0, 1],
+      [1, 0],
+      [-1, 0],
+      [0, -1],
+    ];
+
+    while (qHead < queue.length) {
+      const cur = queue[qHead++];
+      const d = dist[cur];
+      const cx = cur % MAP_SIZE;
+      const cy = Math.floor(cur / MAP_SIZE);
+
+      if (d >= MAX_DIST) continue;
+
+      for (const [dx, dy] of dirs) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (!inBounds(nx, ny)) continue;
+        const ni = idx(nx, ny);
+        if (visited[ni]) continue;
+
+        // Found an existing path/road/quad/bridge to tie directly into!
+        if (isNetworkSurface(tiles.surface[ni]) && tiles.owner[ni] < 0) {
+          parent[ni] = cur;
+          targetTile = ni;
+          break;
+        }
+
+        if (!canTraverse(ni)) continue;
+        visited[ni] = 1;
+        dist[ni] = d + 1;
+        parent[ni] = cur;
+        queue.push(ni);
+      }
+      if (targetTile >= 0) break;
+    }
+
+    if (targetTile < 0) return false;
+
+    // Backtrack from junction tile (don't overwrite the existing junction tile itself) back to building edge
+    let step = parent[targetTile];
+    let laid = 0;
+    while (step >= 0) {
+      const sx = step % MAP_SIZE;
+      const sy = Math.floor(step / MAP_SIZE);
+      const isWetCross =
+        (tiles.flags[step] & (TileFlag.Bayou | TileFlag.Canal)) !== 0 ||
+        tiles.type[step] === TileType.Marsh;
+      tiles.surface[step] = isWetCross ? SurfaceType.Boardwalk : SurfaceType.Path;
+      this.clearVegAt(sx, sy, 1, 1);
+      laid++;
+      step = parent[step];
+    }
+
+    return laid > 0;
   }
 
   private clearVegAt(tx: number, ty: number, w: number, h: number): void {
