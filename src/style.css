@@ -1945,3 +1945,170 @@ button:active {
   color: var(--px-ink);
   box-shadow: var(--px-bevel-out);
 }
+
+
+/* =====================================================================
+   iOS / iPHONE / iPAD SAFE-AREA & TOUCH ERGONOMICS
+   ===================================================================== */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#canvas-root,
+#canvas-root canvas {
+  touch-action: none;
+}
+
+.app-bar {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: max(8px, env(safe-area-inset-left, 8px));
+  padding-right: max(8px, env(safe-area-inset-right, 8px));
+  height: calc(48px + env(safe-area-inset-top, 0px));
+}
+
+.goal-card {
+  top: calc(58px + env(safe-area-inset-top, 0px));
+  left: max(12px, env(safe-area-inset-left, 12px));
+}
+
+.popover {
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 12px));
+  max-height: calc(100vh - 80px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.build-dock {
+  bottom: max(10px, env(safe-area-inset-bottom, 10px));
+  max-width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+}
+
+.dock-fab {
+  position: fixed;
+  bottom: max(14px, env(safe-area-inset-bottom, 14px));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 20px;
+  background: var(--px-gold);
+  color: var(--px-ink);
+  border: 3px solid var(--px-ink);
+  box-shadow: var(--px-bevel-out), var(--px-shadow);
+  font-family: var(--px-font-head);
+  font-size: 12px;
+  z-index: 25;
+  pointer-events: auto;
+}
+
+.dock-hide-btn {
+  display: none;
+}
+
+@media (max-width: 960px), (max-height: 520px) {
+  .dock-hide-btn {
+    display: inline-flex;
+  }
+
+  .app-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .app-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .brand-badge {
+    display: none;
+  }
+
+  .goal-card {
+    width: 245px;
+    padding: 8px 10px;
+  }
+
+  .goal-title {
+    font-size: 10.5px;
+  }
+
+  .goal-step {
+    font-size: 11px;
+    padding: 2px 4px;
+  }
+
+  .build-dock {
+    padding: 6px 8px 8px;
+  }
+
+  .dock-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 5px;
+  }
+
+  .cat-tabs {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .cat-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .cat-tab {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .tool-mods {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dock-items {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .dock-items::-webkit-scrollbar {
+    display: none;
+  }
+
+  .build-item {
+    min-width: 94px;
+    flex-shrink: 0;
+  }
+
+  .ticker-strip {
+    display: none;
+  }
+
+  .title-card {
+    padding: 18px 20px;
+    max-height: 92vh;
+    overflow-y: auto;
+  }
+
+  .title-wordmark {
+    font-size: 24px;
+  }
+}
+
+@media (max-height: 500px) {
+  .goal-steps {
+    display: none;
+  }
+  .goal-card {
+    padding: 7px 10px;
+  }
+}

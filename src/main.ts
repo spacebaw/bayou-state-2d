@@ -1,11 +1,22 @@
 import './style.css';
 import { SoundEngine } from './audio/sound';
+import {
+  hapticHeavy,
+  hapticPlace,
+  hapticSuccess,
+  hapticTap,
+  hapticWarning,
+  initNativeIOS,
+  saveOrSharePostcard,
+} from './native/ios';
 import { Renderer2D } from './render2d/renderer2d';
 import { CATALOG } from './sim/catalog';
 import { SimEngine } from './sim/engine';
 import { idx, inBounds } from './sim/terrain';
 import { BuildingId, OverlayMode } from './sim/types';
 import { HudController } from './ui/hud';
+
+void initNativeIOS();
 
 const SAVE_KEY = 'bayou_state_2d_save';
 
@@ -138,10 +149,7 @@ const hud = new HudController(hudRoot, sim, {
   },
   onCapturePostcard: (framed) => {
     const dataUrl = renderer.capturePostcard(sim.state, framed);
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    a.download = `bayou-state-2d-postcard-y${sim.state.year}.png`;
-    a.click();
+    void saveOrSharePostcard(dataUrl, `bayou-state-2d-postcard-y${sim.state.year}.png`);
   },
   onSelectBuilding: (id) => {
     hud.selectedBuildingId = id;
@@ -150,8 +158,17 @@ const hud = new HudController(hudRoot, sim, {
 
 sim.onEvent((ev) => {
   sound.handleEvent(ev);
-  if (ev.type === 'touchdown') renderer.camera.addShake(1.4);
-  else if (ev.type === 'lightning') renderer.camera.addShake(0.7);
+  if (ev.type === 'place' || ev.type === 'upgrade') hapticPlace();
+  else if (ev.type === 'demolish') hapticTap();
+  else if (ev.type === 'goal_complete' || ev.type === 'game_win') hapticSuccess();
+  else if (ev.type === 'storm_warn' || ev.type === 'blackout') hapticWarning();
+  if (ev.type === 'touchdown') {
+    renderer.camera.addShake(1.4);
+    hapticHeavy();
+  } else if (ev.type === 'lightning') {
+    renderer.camera.addShake(0.7);
+    hapticHeavy();
+  }
 });
 
 renderer.camera.focusOnTile(40, 17, 1.02);
@@ -252,11 +269,51 @@ function commitDragTrail(): void {
 }
 
 const dom = renderer.canvas;
+dom.style.touchAction = 'none';
 dom.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Multi-touch pointer tracker for smooth iPhone/iPad pinch-to-zoom & 2-finger pan!
+const activePointers = new Map<number, { x: number; y: number }>();
+let pinchPrevDist = 0;
+let pinchPrevMidX = 0;
+let pinchPrevMidY = 0;
+let isPinching = false;
+
+function getPinchMetrics(): { dist: number; midX: number; midY: number } | null {
+  if (activePointers.size < 2) return null;
+  const pts = Array.from(activePointers.values());
+  const a = pts[0];
+  const b = pts[1];
+  return {
+    dist: Math.hypot(b.x - a.x, b.y - a.y),
+    midX: (a.x + b.x) * 0.5,
+    midY: (a.y + b.y) * 0.5,
+  };
+}
 
 dom.addEventListener('pointerdown', (e) => {
   sound.unlock();
   if (hud.showTitle) return;
+
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+
+  // 2+ fingers down -> switch immediately into smooth pinch-to-zoom + 2-finger pan!
+  if (activePointers.size >= 2) {
+    const m = getPinchMetrics();
+    if (m) {
+      isPinching = true;
+      isPanDragging = false;
+      isBuildDragging = false;
+      dragTrail = [];
+      pinchPrevDist = Math.max(1, m.dist);
+      pinchPrevMidX = m.midX;
+      pinchPrevMidY = m.midY;
+    }
+    return;
+  }
+
   dragStartX = e.clientX;
   dragStartY = e.clientY;
   dragMoved = false;
@@ -275,6 +332,8 @@ dom.addEventListener('pointerdown', (e) => {
   if (e.button === 0 && (hud.selectedTool || hud.bulldozeMode)) {
     const hit = pickTile(e.clientX, e.clientY);
     if (hit) {
+      hoverTx = hit.tx;
+      hoverTy = hit.ty;
       if (hud.selectedTool && CATALOG[hud.selectedTool].drag) {
         // Start reversible drag-preview trail instead of committing immediately!
         dragTrail = [makeTrailNode(hud.selectedTool, hit.tx, hit.ty)];
@@ -290,12 +349,31 @@ dom.addEventListener('pointerdown', (e) => {
 });
 
 window.addEventListener('pointermove', (e) => {
+  if (activePointers.has(e.pointerId)) {
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  }
+
+  if (isPinching && activePointers.size >= 2) {
+    const m = getPinchMetrics();
+    if (m) {
+      const ratio = m.dist / Math.max(1, pinchPrevDist);
+      if (Math.abs(ratio - 1) > 0.005) {
+        renderer.camera.zoomBy(ratio);
+      }
+      renderer.camera.panByScreenDelta(m.midX - pinchPrevMidX, m.midY - pinchPrevMidY);
+      pinchPrevDist = Math.max(1, m.dist);
+      pinchPrevMidX = m.midX;
+      pinchPrevMidY = m.midY;
+    }
+    return;
+  }
+
   const dx = e.clientX - lastMouseX;
   const dy = e.clientY - lastMouseY;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 
-  if (Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) > 5) dragMoved = true;
+  if (Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) > 6) dragMoved = true;
 
   if (isPanDragging) {
     renderer.camera.panByScreenDelta(dx, dy);
@@ -320,13 +398,28 @@ window.addEventListener('pointermove', (e) => {
   }
 });
 
-window.addEventListener('pointerup', (e) => {
+function handlePointerEnd(e: PointerEvent): void {
+  activePointers.delete(e.pointerId);
+  if (isPinching) {
+    if (activePointers.size < 2) {
+      isPinching = false;
+      // Avoid stale pan delta when releasing the second finger
+      const remaining = Array.from(activePointers.values())[0];
+      if (remaining) {
+        lastMouseX = remaining.x;
+        lastMouseY = remaining.y;
+      }
+    }
+    return;
+  }
+
   if (isPanDragging && !dragMoved && e.button === 0 && !hud.showTitle) {
     const hit = pickTile(e.clientX, e.clientY);
     if (hit) {
       const owner = sim.state.tiles.owner[idx(hit.tx, hit.ty)];
       hud.selectedBuildingId = owner >= 0 ? owner : null;
       hud.openPopover = 'none';
+      if (owner >= 0) hapticTap();
       hud.render(true);
     }
   }
@@ -335,7 +428,15 @@ window.addEventListener('pointerup', (e) => {
   }
   isPanDragging = false;
   isBuildDragging = false;
-});
+  // Clear lingering hover ghost/tooltip after lifting a touch finger
+  if (e.pointerType === 'touch') {
+    hoverTx = -1;
+    hoverTy = -1;
+  }
+}
+
+window.addEventListener('pointerup', handlePointerEnd);
+window.addEventListener('pointercancel', handlePointerEnd);
 
 dom.addEventListener(
   'wheel',

@@ -71,6 +71,7 @@ export class HudController {
   // Cursor hint element updated directly on mousemove (zero full DOM rebuilds)
   private hintEl: HTMLDivElement;
   private lastHudHash = '';
+  dockCollapsed = typeof window !== 'undefined' && window.innerHeight <= 520;
 
   constructor(root: HTMLElement, sim: SimEngine, cb: HudCallbacks) {
     this.root = root;
@@ -126,6 +127,7 @@ export class HudController {
       this.photoFramed,
       this.brightNight,
       this.muted,
+      this.dockCollapsed,
       s.economy.cash,
       s.economy.students,
       s.economy.prestige,
@@ -567,53 +569,60 @@ export class HudController {
         `);
       }
 
-      // 9. BOTTOM BUILD DOCK
-      const items = CATALOG_ORDER.map((id) => CATALOG[id]).filter((d) => d.category === this.activeCat);
-      const townLocked = this.activeCat === 'town' && !s.collegeTownUnlocked && s.economy.campusLevel < 10;
-      parts.push(`
-        <div class="build-dock">
-          <div class="dock-top">
-            <div class="cat-tabs">
-              ${CATEGORIES.map(
-                (c) =>
-                  `<button class="cat-tab ${this.activeCat === c.id ? 'active' : ''}" data-act="cat" data-v="${c.id}">${
-                    c.id === 'town' && !s.collegeTownUnlocked && s.economy.campusLevel < 10 ? '🔒 ' : ''
-                  }${c.label}</button>`,
-              ).join('')}
+      // 9. BOTTOM BUILD DOCK (collapsible for iPhone / iPad touch play!)
+      if (this.dockCollapsed) {
+        parts.push(`
+          <button class="dock-fab" data-act="dock-toggle">🔨 BUILD</button>
+        `);
+      } else {
+        const items = CATALOG_ORDER.map((id) => CATALOG[id]).filter((d) => d.category === this.activeCat);
+        const townLocked = this.activeCat === 'town' && !s.collegeTownUnlocked && s.economy.campusLevel < 10;
+        parts.push(`
+          <div class="build-dock">
+            <div class="dock-top">
+              <div class="cat-tabs">
+                ${CATEGORIES.map(
+                  (c) =>
+                    `<button class="cat-tab ${this.activeCat === c.id ? 'active' : ''}" data-act="cat" data-v="${c.id}">${
+                      c.id === 'town' && !s.collegeTownUnlocked && s.economy.campusLevel < 10 ? '🔒 ' : ''
+                    }${c.label}</button>`,
+                ).join('')}
+              </div>
+              <div class="tool-mods">
+                <button class="mod-btn ${this.pilingsMode ? 'active' : ''}" data-act="pilings" title="Elevate eligible buildings 3 ft on Pilings (+40% cost, flood-safe)">
+                  🪵 Pilings (P): ${this.pilingsMode ? 'ON' : 'OFF'}
+                </button>
+                <button class="mod-btn" data-act="rotate" title="Rotate Building Footprint (R)">↻ Rotate (R)</button>
+                <button class="mod-btn danger ${this.bulldozeMode ? 'active' : ''}" data-act="bulldoze" title="Demolish / Clear Tile (X)">
+                  🚜 Bulldoze (X)
+                </button>
+                <button class="mod-btn dock-hide-btn" data-act="dock-toggle" title="Hide Build Dock">▼ Hide</button>
+              </div>
             </div>
-            <div class="tool-mods">
-              <button class="mod-btn ${this.pilingsMode ? 'active' : ''}" data-act="pilings" title="Elevate eligible buildings 3 ft on Pilings (+40% cost, flood-safe)">
-                🪵 Pilings (P): ${this.pilingsMode ? 'ON' : 'OFF'}
-              </button>
-              <button class="mod-btn" data-act="rotate" title="Rotate Building Footprint (R)">↻ Rotate (R)</button>
-              <button class="mod-btn danger ${this.bulldozeMode ? 'active' : ''}" data-act="bulldoze" title="Demolish / Clear Tile (X)">
-                🚜 Bulldoze (X)
-              </button>
-            </div>
+            ${
+              townLocked
+                ? `<div class="town-lock-bar">
+                     <span>🏘️ <strong>College Town</strong> unlocks at <strong>Campus Level 10</strong> (you are Lv.${s.economy.campusLevel} — build halls, upgrade venues &amp; complete goals to earn XP!).</span>
+                     <button class="pill-cta" data-act="unlock-town">✨ Unlock Early (Sandbox)</button>
+                   </div>`
+                : `<div class="dock-items">
+                    ${items
+                      .map(
+                        (d) => `
+                      <button class="build-item ${this.selectedTool === d.id && !this.bulldozeMode ? 'selected' : ''}"
+                              data-act="tool" data-v="${d.id}" title="${d.description}">
+                        <div class="b-swatch" style="background:${d.accentColor}"></div>
+                        <div class="b-name">${d.shortName}</div>
+                        <div class="b-cost">${d.cost === 0 ? 'FREE' : fmtMoney(d.cost)}${d.drag ? ' / tile' : ''}</div>
+                      </button>
+                    `,
+                      )
+                      .join('')}
+                  </div>`
+            }
           </div>
-          ${
-            townLocked
-              ? `<div class="town-lock-bar">
-                   <span>🏘️ <strong>College Town</strong> unlocks at <strong>Campus Level 10</strong> (you are Lv.${s.economy.campusLevel} — build halls, upgrade venues &amp; complete goals to earn XP!).</span>
-                   <button class="pill-cta" data-act="unlock-town">✨ Unlock Early (Sandbox)</button>
-                 </div>`
-              : `<div class="dock-items">
-                  ${items
-                    .map(
-                      (d) => `
-                    <button class="build-item ${this.selectedTool === d.id && !this.bulldozeMode ? 'selected' : ''}"
-                            data-act="tool" data-v="${d.id}" title="${d.description}">
-                      <div class="b-swatch" style="background:${d.accentColor}"></div>
-                      <div class="b-name">${d.shortName}</div>
-                      <div class="b-cost">${d.cost === 0 ? 'FREE' : fmtMoney(d.cost)}${d.drag ? ' / tile' : ''}</div>
-                    </button>
-                  `,
-                    )
-                    .join('')}
-                </div>`
-          }
-        </div>
-      `);
+        `);
+      }
 
       // 10b. BOARD OF REGENTS / STUDENT VOICE DILEMMA CARD
       if (s.activeDilemma) {
@@ -829,6 +838,9 @@ export class HudController {
             break;
           case 'cat':
             this.activeCat = val as BuildingCategory;
+            break;
+          case 'dock-toggle':
+            this.dockCollapsed = !this.dockCollapsed;
             break;
           case 'tool': {
             const id = val as BuildingId;
